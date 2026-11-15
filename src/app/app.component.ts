@@ -6,8 +6,8 @@ import { MatIconModule } from "@angular/material/icon";
 import { MatButtonModule } from "@angular/material/button";
 import { ThemeService } from "./shared/services/theme.service";
 import { MatDialog } from "@angular/material/dialog";
-import { SettingsComponent } from "./shared/modals/settings/settings.component";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { SettingsComponent } from "./shared/components/modals/settings/settings.component";
 
 type LightModeIcon = "light_mode" | "light_mode_auto" | "light_mode_filled";
 

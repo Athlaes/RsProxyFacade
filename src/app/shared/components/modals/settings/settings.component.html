@@ -1,0 +1,30 @@
+<h2 mat-dialog-title>Settings</h2>
+<mat-dialog-content>
+    <form class="main-content" [formGroup]="settingsForm">
+        <div class="left-panel">
+            @for (categorie of settings.categories; track categorie) {
+                <button matButton="text">{{ categorie.display }}</button>
+            }
+        </div>
+        <div class="right-panel">
+            @for (parameter of selectedCategorie()?.parameters; track parameter) {
+                @switch (parameter.type) {
+                    @case ("bool") {
+                        <div class="parameter-row">
+                            <div class="parameter-label">{{ parameter.label }}</div>
+                            <div class="parameter-action">
+                                <mat-slide-toggle
+                                    [formControl]="settingsForm.controls[parameter.name]"
+                                ></mat-slide-toggle>
+                            </div>
+                        </div>
+                    }
+                }
+            }
+        </div>
+    </form>
+</mat-dialog-content>
+<mat-dialog-actions>
+    <button matButton="outlined" (click)="close()">Close</button>
+    <button matButton="filled">Save</button>
+</mat-dialog-actions>

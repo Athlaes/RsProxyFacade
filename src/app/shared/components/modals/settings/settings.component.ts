@@ -1,11 +1,11 @@
-import { Component, inject } from "@angular/core";
+import { Component, inject, signal } from "@angular/core";
 import { FormBuilder, FormControl, ReactiveFormsModule } from "@angular/forms";
 import { MAT_DIALOG_DATA, MatDialogModule, MatDialogRef } from "@angular/material/dialog";
-import { settings } from "../../config/settings";
 import { MatButtonModule } from "@angular/material/button";
 import { MatFormFieldModule } from "@angular/material/form-field";
 import { MatInputModule } from "@angular/material/input";
 import { MatSlideToggleModule } from "@angular/material/slide-toggle";
+import { settings } from "../../../config/settings";
 
 @Component({
   imports: [
@@ -31,6 +31,8 @@ export class SettingsComponent {
     minimizeToTaskbar: new FormControl(false, { nonNullable: true }),
     forceSystemToUseExposedProxyPac: new FormControl(false, { nonNullable: false }),
   });
+
+  selectedCategorie = signal(settings.categories.find((c) => c.name === "general"));
 
   close() {
     this.dialogRef.close();

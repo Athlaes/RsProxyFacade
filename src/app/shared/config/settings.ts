@@ -8,10 +8,17 @@ export type Categorie = {
   parameters: Parameter[];
 };
 
+export type ParameterName =
+  | "startProxyServerOnAppStart"
+  | "startPacServerOnAppStart"
+  | "startAppOnOsStart"
+  | "minimizeToTaskbar"
+  | "forceSystemToUseExposedProxyPac";
+
 export interface Parameter {
   type: "bool";
   label: string;
-  name: string;
+  name: ParameterName;
   value: string | string[] | boolean | { key: string; value: string }[];
 }
 
@@ -23,7 +30,13 @@ export const settings: Settings = {
       parameters: [
         {
           type: "bool",
-          label: "Start proxy server when app start",
+          label: "Start app on OS start",
+          name: "startAppOnOsStart",
+          value: false,
+        },
+        {
+          type: "bool",
+          label: "Minimize to taskbar on minimize",
           name: "minimizeToTaskbar",
           value: false,
         },
@@ -35,20 +48,14 @@ export const settings: Settings = {
         },
         {
           type: "bool",
-          label: "Start proxy server when app start",
+          label: "Start proxy pac server when app start",
           name: "startPacServerOnAppStart",
           value: false,
         },
         {
           type: "bool",
-          label: "startAppOnOsStart",
-          name: "startAppOnOsStart",
-          value: false,
-        },
-        {
-          type: "bool",
-          label: "Start proxy server when app start",
-          name: "minimizeToTaskbar",
+          label: "Force system to use exposed proxy pac when server is started",
+          name: "forceSystemToUseExposedProxyPac",
           value: false,
         },
       ],
