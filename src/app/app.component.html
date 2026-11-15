@@ -1,0 +1,21 @@
+<mat-toolbar class="toolbar">
+    <div class="title">
+        <img class="title-icon" src="/assets/app-icon.png" alt="" />
+        <h1 class="title-text">RsProxyFacade</h1>
+    </div>
+    <div class="actions">
+        <button matIconButton (click)="openGithubUrl()">
+            <!-- <img class="icon" src="/assets/github.svg" /> -->
+            <span class="icon" aria-hidden="true"></span>
+        </button>
+        <button matIconButton (click)="nextTheme()">
+            <mat-icon>{{ lightModeIcon() }}</mat-icon>
+        </button>
+        <button matIconButton (click)="openSettings()">
+            <mat-icon>settings</mat-icon>
+        </button>
+    </div>
+</mat-toolbar>
+<div class="main">
+    <router-outlet />
+</div>

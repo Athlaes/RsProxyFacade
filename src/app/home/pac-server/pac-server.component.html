@@ -1,0 +1,40 @@
+<app-expansion-panel>
+    <div expansionPanelHeader>Pac file exposure</div>
+    <form class="app-form-container" [formGroup]="createProxyPacForm">
+        <app-panel-section>
+            <div panelSectionHeader>Server configuration</div>
+            <div class="app-form-row">
+                <mat-form-field class="full-length">
+                    <mat-label>Host</mat-label>
+                    <input type="text" matInput [formControl]="createProxyPacForm.controls['host']" />
+                </mat-form-field>
+                <mat-form-field class="full-length port">
+                    <mat-label>Port</mat-label>
+                    <input type="number" matInput [formControl]="createProxyPacForm.controls['port']" />
+                </mat-form-field>
+            </div>
+            <div class="app-form-row">
+                <mat-form-field class="full-length">
+                    <mat-label>Pac url</mat-label>
+                    <input type="text" matInput [formControl]="createProxyPacForm.controls['pacUrl']" />
+                    <mat-hint>URL can be 'https://', 'http://', or "file://"</mat-hint>
+                </mat-form-field>
+            </div>
+        </app-panel-section>
+        <div class="app-form-footer">
+            <app-server-status
+                (statusChange)="updateStatus($event)"
+                [pollingMethod]="commandService.getPacServerStatus"
+            ></app-server-status>
+            @if (serverService.isProxyPacServerStarted()) {
+                <button matButton="filled" class="start-btn" (click)="serverService.stopProxyPacServer()">
+                    <mat-icon class="app-icon filled"> stop</mat-icon>Stop Pac server
+                </button>
+            } @else {
+                <button matButton="filled" class="start-btn" (click)="startProxyPacServer()">
+                    <mat-icon class="app-icon filled">play_arrow</mat-icon>Start Pac server
+                </button>
+            }
+        </div>
+    </form>
+</app-expansion-panel>

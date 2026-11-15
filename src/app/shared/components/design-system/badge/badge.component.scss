@@ -1,0 +1,36 @@
+:host {
+    display: flex;
+
+    .badge {
+        display: flex;
+        color: var(--mat-sys-inverse-on-primary);
+        background-color: var(--mat-sys-inverse-primary);
+        padding: 0 20px;
+        gap: 10px;
+        border-radius: 9999px;
+        font-weight: 400;
+        align-items: center;
+
+        .indicator {
+            display: flex;
+            width: 10px;
+            height: 10px;
+            border: 1px solid var(--mat-sys-primary);
+            border-radius: 9999px;
+            background: linear-gradient(45deg, var(--indicator-color) 60%, white 100%);
+
+            &.success {
+                --indicator-color: limegreen;
+            }
+            &.fail {
+                --indicator-color: red;
+            }
+        }
+
+        .badge-text {
+            margin: 0;
+            padding: 0;
+            font-size: 13px;
+        }
+    }
+}

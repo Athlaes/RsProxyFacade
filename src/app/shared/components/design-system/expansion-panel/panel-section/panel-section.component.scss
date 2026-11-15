@@ -1,0 +1,25 @@
+:host {
+    display: flex;
+
+    .bordered-container {
+        display: flex;
+        flex-direction: column;
+        border: 1px solid var(--mat-sys-inverse-primary);
+        padding: 20px 20px 10px 20px;
+        border-radius: 4px;
+        position: relative;
+        width: 100%;
+        gap: 10px;
+
+        .container-title {
+            position: absolute;
+            top: 0;
+            transform: translateY(-50%);
+            background-color: var(--mat-sys-surface);
+            padding: 0 10px;
+            margin: 0;
+            color: var(--mat-sys-primary);
+            width: fit-content;
+        }
+    }
+}

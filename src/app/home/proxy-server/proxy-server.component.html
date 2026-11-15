@@ -1,0 +1,104 @@
+<app-expansion-panel class="app-expansion-panel" expanded="true">
+    <div expansionPanelHeader>Proxy Server</div>
+    <form class="app-form-container" [formGroup]="createProxyForm">
+        <app-panel-section>
+            <div panelSectionHeader>Server configuration</div>
+            <div class="app-form-row">
+                <mat-form-field class="full-length">
+                    <mat-label>Host</mat-label>
+                    <input type="text" matInput [formControl]="createProxyForm.controls['host']" />
+                    <mat-error> </mat-error>
+                </mat-form-field>
+                <mat-form-field class="full-length port">
+                    <mat-label>Port</mat-label>
+                    <input type="number" matInput [formControl]="createProxyForm.controls['port']" />
+                </mat-form-field>
+            </div>
+        </app-panel-section>
+        <app-panel-section>
+            <div panelSectionHeader>Target configuration</div>
+            <mat-tab-group
+                class="app-tab-group"
+                [selectedIndex]="getInitialTabIndex()"
+                (selectedTabChange)="updateProxyModeControl($event)"
+            >
+                @for (tabName of proxyModeTabs; track tabName) {
+                    @if (tabName === "Direct" || tabName === "System") {
+                        <mat-tab [label]="tabName" tabName }}></mat-tab>
+                    }
+                    @if (tabName === "Manual") {
+                        <mat-tab [label]="tabName" tabName }}>
+                            <div class="app-form-row">
+                                <mat-form-field class="full-length">
+                                    <mat-label>Host</mat-label>
+                                    <input type="text" matInput [formControl]="createProxyForm.controls['proxyHost']" />
+                                </mat-form-field>
+                                <mat-form-field class="full-length port">
+                                    <mat-label>Port</mat-label>
+                                    <input
+                                        type="number"
+                                        matInput
+                                        [formControl]="createProxyForm.controls['proxyPort']"
+                                    />
+                                </mat-form-field>
+                            </div>
+                            <div class="app-form-row">
+                                <mat-form-field class="full-length">
+                                    <mat-label>Username</mat-label>
+                                    <input
+                                        type="text"
+                                        matInput
+                                        [formControl]="createProxyForm.controls['proxyUsername']"
+                                    />
+                                </mat-form-field>
+                                <mat-form-field class="full-length">
+                                    <mat-label>Password</mat-label>
+                                    <input
+                                        type="password"
+                                        matInput
+                                        [formControl]="createProxyForm.controls['proxyPassword']"
+                                    />
+                                </mat-form-field>
+                            </div>
+                        </mat-tab>
+                    }
+                    @if (tabName === "Pac") {
+                        <mat-tab [label]="tabName" tabName }}>
+                            <div class="app-form-row">
+                                <mat-form-field class="full-length">
+                                    <mat-label>PAC url</mat-label>
+                                    <input
+                                        type="text"
+                                        matInput
+                                        [formControl]="createProxyForm.controls['proxyPacUrl']"
+                                    />
+                                    <mat-hint>URL can be 'https://', 'http://', or "file://"</mat-hint>
+                                </mat-form-field>
+                            </div>
+                            <div class="app-form-row">
+                                <mat-slide-toggle [formControl]="createProxyForm.controls['useExposedPacUrl']"
+                                    >Use exposed proxy pac url</mat-slide-toggle
+                                >
+                            </div>
+                        </mat-tab>
+                    }
+                }
+            </mat-tab-group>
+        </app-panel-section>
+        <div class="app-form-footer">
+            <app-server-status
+                (statusChange)="updateStatus($event)"
+                [pollingMethod]="commandService.getProxyServerStatus"
+            ></app-server-status>
+            @if (serverService.isProxyServerStarted()) {
+                <button matButton="filled" class="start-btn" (click)="serverService.stopProxyServer()">
+                    <mat-icon class="app-icon filled">stop</mat-icon>Stop proxy server
+                </button>
+            } @else {
+                <button matButton="filled" class="start-btn" (click)="startProxyServer()">
+                    <mat-icon class="app-icon filled">play_arrow_filled</mat-icon>Start proxy server
+                </button>
+            }
+        </div>
+    </form>
+</app-expansion-panel>
