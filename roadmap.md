@@ -3,7 +3,7 @@
 - [x] Compléter le démarrage et l'arrêt du proxy via l'UI
 - [x] Permettre la récupération d'un fichier sur le système
 - [x] Permettre à l'application d'exposer un fichier PAC sur un server http
-- [ ] Mettre en place l'ui pour les settings
+- [x] Mettre en place l'ui pour les settings
 - [ ] Fiabiliser le fonctionnement du proxy en mode DIRECT (sans authentification)
 - [ ] Fiabiliser le fonctionnement du proxy en mode MANUAL (sans authentification)
 - [ ] Fiabiliser le fonctionnement du proxy en mode PAC avec récupération du fichier via url "http://" / "https://" (sans authentification)

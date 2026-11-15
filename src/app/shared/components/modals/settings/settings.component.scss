@@ -1,0 +1,47 @@
+:host {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+
+    .main-content {
+        display: flex;
+        width: 100%;
+        height: 100%;
+        flex-direction: row;
+        overflow-y: auto;
+        overflow-x: hidden;
+
+        .left-panel {
+            display: flex;
+            flex-direction: column;
+            flex: 0.35;
+            border-right: 0.5px solid var(--mat-sys-primary);
+            padding: 0 15px 0 0;
+        }
+
+        .right-panel {
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            padding: 0 0 0 15px;
+            gap: 10px;
+
+            .parameter-row {
+                display: flex;
+                width: 100%;
+                align-items: center;
+
+                .parameter-label {
+                    display: flex;
+                    flex: 1;
+                }
+
+                .parameter-action {
+                    display: flex;
+                    justify-content: end;
+                    flex: 0.35;
+                }
+            }
+        }
+    }
+}

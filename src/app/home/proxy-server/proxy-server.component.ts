@@ -29,7 +29,7 @@ type CreateProxyForm = {
   proxyUsername: FormControl<string>;
   proxyPassword: FormControl<string>;
   proxyPacUrl: FormControl<string>;
-  useExposedPacUrl: FormControl<boolean>;
+  useExposedPacServer: FormControl<boolean>;
 };
 
 @Component({
@@ -93,28 +93,30 @@ export class ProxyServerComponent {
       nonNullable: true,
       validators: [],
     }),
-    useExposedPacUrl: new FormControl(localStorage.getItem("server_form_proxy_use_exposed_pac_url") === "true", {
+    useExposedPacServer: new FormControl(localStorage.getItem("server_form_proxy_use_exposed_pac_server") === "true", {
       nonNullable: true,
       validators: [],
     }),
   });
   private readonly createProxyFormChange = toSignal(this.createProxyForm.valueChanges.pipe(debounceTime(500)));
-  private readonly exposedPacUrlChange = toSignal(this.createProxyForm.controls.useExposedPacUrl.valueChanges);
+  private readonly exposedPacUrlChange = toSignal(this.createProxyForm.controls.useExposedPacServer.valueChanges);
 
   private readonly forcePacUrlWhenExposedIsTrue = effect(() => {
     let exposedPacUrl = this.exposedPacUrlChange();
     if (exposedPacUrl) {
-      let storedPacUrl = localStorage.getItem("server_pac_form_proxy_pac_url");
-      if (!storedPacUrl) {
+      let storedPacHost = localStorage.getItem("server_pac_form_host");
+      let storedPacPort = localStorage.getItem("server_pac_form_port");
+      if (!storedPacHost || !storedPacPort) {
         this.snackService.open("Pac server not configured", "Close", {
           panelClass: ["app-snackbar", "error"],
           duration: 4000,
         });
-        this.createProxyForm.controls.useExposedPacUrl.setValue(false);
+        this.createProxyForm.controls.useExposedPacServer.setValue(false);
         return;
       }
       this.createProxyForm.controls.proxyPacUrl.disable();
-      this.createProxyForm.controls.proxyPacUrl.setValue(storedPacUrl);
+      const pacUrl = `http://${storedPacHost}:${storedPacPort}/proxy.pac`;
+      this.createProxyForm.controls.proxyPacUrl.setValue(pacUrl);
     } else {
       this.createProxyForm.controls.proxyPacUrl.enable();
     }
@@ -138,7 +140,7 @@ export class ProxyServerComponent {
     localStorage.setItem("server_form_proxy_username", proxyForm?.proxyUsername ?? "");
     localStorage.setItem("server_form_proxy_password", proxyForm?.proxyPassword ?? "");
     localStorage.setItem("server_form_proxy_pac_url", proxyForm?.proxyPacUrl ?? "");
-    localStorage.setItem("server_form_proxy_use_exposed_pac_url", String(proxyForm?.useExposedPacUrl ?? false));
+    localStorage.setItem("server_form_proxy_use_exposed_pac_server", String(proxyForm?.useExposedPacServer ?? false));
   });
 
   updateStatus(status: BadgeStatus) {
@@ -188,7 +190,7 @@ export class ProxyServerComponent {
     }
     if (
       this.createProxyForm.controls.proxyMode.getRawValue() === "Pac" &&
-      this.createProxyForm.controls.useExposedPacUrl &&
+      this.createProxyForm.controls.useExposedPacServer.getRawValue() &&
       !this.serverService.isProxyPacServerStarted()
     ) {
       this.snackService.open("Server is configured to use exposed pac file but server is not started", "Close", {

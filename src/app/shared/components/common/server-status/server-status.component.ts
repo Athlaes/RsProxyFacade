@@ -48,6 +48,6 @@ export class ServerStatusComponent implements OnInit {
             panelClass: ["app-snackbar", "fail"],
           });
         });
-    }, 4000);
+    }, 1000);
   }
 }

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 use tokio::sync::Mutex;
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use crate::{pac::server::ProxyPacServer, proxy::server::ProxyServer};
@@ -47,4 +48,5 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("Error while running tauri application");
+    info!("Application started successfully.")
 }
