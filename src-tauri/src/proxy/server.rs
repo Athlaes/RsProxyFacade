@@ -9,7 +9,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     task::JoinHandle,
 };
-use tracing::info;
+use tracing::{error, info, warn};
 
 use crate::commands::CommandError;
 
@@ -57,15 +57,18 @@ impl ProxyServer {
 
         let handle = tokio::task::spawn(async move {
             loop {
-                let (stream, _) = listener
-                    .accept()
-                    .await
-                    .unwrap_or_else(|err| panic!("Proxy tcp listener unable to accept any connection : {err}"));
+                let (stream, _) = match listener.accept().await {
+                    Ok(connection) => connection,
+                    Err(err) => {
+                        error!(%err, "Proxy listener stopped after an accept error");
+                        break;
+                    }
+                };
                 let io = TokioIo::new(stream);
                 let server_config = Arc::clone(&server_config);
 
                 tokio::task::spawn(async move {
-                    server::conn::http1::Builder::new()
+                    if let Err(err) = server::conn::http1::Builder::new()
                         .preserve_header_case(true)
                         .title_case_headers(true)
                         .serve_connection(
@@ -74,7 +77,9 @@ impl ProxyServer {
                         )
                         .with_upgrades()
                         .await
-                        .unwrap_or_else(|err| panic!("Proxy server unable to process requests : {err}"));
+                    {
+                        warn!(%err, "Proxy client connection failed");
+                    }
                 });
             }
         });
@@ -101,10 +106,11 @@ impl ProxyServer {
     }
 
     async fn proxy_req(
-        req: Request<hyper::body::Incoming>,
+        mut req: Request<hyper::body::Incoming>,
         _: Arc<ProxyConfig>,
     ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
-        println!("req: {:?}", req);
+        // Client proxy credentials must never be forwarded to the destination.
+        req.headers_mut().remove(http::header::PROXY_AUTHORIZATION);
 
         if Method::CONNECT == req.method() {
             // Received an HTTP request like:
@@ -121,10 +127,23 @@ impl ProxyServer {
             // connection be upgraded, so we can't return a response inside
             // `on_upgrade` future.
             if let Some(addr) = Self::host_addr(req.uri()) {
+                // Establish the destination connection before acknowledging CONNECT.
+                let stream = match TcpStream::connect(addr).await {
+                    Ok(stream) => stream,
+                    Err(err) => {
+                        warn!(%err, "CONNECT destination connection failed");
+                        let status = if err.kind() == std::io::ErrorKind::TimedOut {
+                            http::StatusCode::GATEWAY_TIMEOUT
+                        } else {
+                            http::StatusCode::BAD_GATEWAY
+                        };
+                        return Ok(Self::error_response(status));
+                    }
+                };
                 tokio::task::spawn(async move {
                     match hyper::upgrade::on(req).await {
                         Ok(upgraded) => {
-                            if let Err(e) = Self::tunnel(upgraded, addr).await {
+                            if let Err(e) = Self::tunnel(upgraded, stream).await {
                                 eprintln!("server io error: {}", e);
                             };
                         }
@@ -138,7 +157,7 @@ impl ProxyServer {
                         .boxed(),
                 ))
             } else {
-                eprintln!("CONNECT host is not socket addr: {:?}", req.uri());
+                warn!("CONNECT request has no destination authority");
                 let mut resp = Response::new(
                     Full::<Bytes>::new("CONNECT must be to a socket address".into())
                         .map_err(|never| -> hyper::Error { match never {} })
@@ -149,37 +168,82 @@ impl ProxyServer {
                 Ok(resp)
             }
         } else {
-            let host = req.uri().host().expect("uri has no host");
+            let Some(host) = req.uri().host() else {
+                return Ok(Self::error_response(http::StatusCode::BAD_REQUEST));
+            };
             let port = req.uri().port_u16().unwrap_or(80);
 
-            let stream = TcpStream::connect((host, port)).await.unwrap();
+            let stream = match TcpStream::connect((host, port)).await {
+                Ok(stream) => stream,
+                Err(err) => {
+                    warn!(%err, "Destination connection failed");
+                    let status = if err.kind() == std::io::ErrorKind::TimedOut {
+                        http::StatusCode::GATEWAY_TIMEOUT
+                    } else {
+                        http::StatusCode::BAD_GATEWAY
+                    };
+                    return Ok(Self::error_response(status));
+                }
+            };
             let io = TokioIo::new(stream);
 
-            let (mut sender, conn) = client::conn::http1::Builder::new()
+            let (mut sender, conn) = match client::conn::http1::Builder::new()
                 .preserve_header_case(true)
                 .title_case_headers(true)
                 .handshake(io)
-                .await?;
+                .await
+            {
+                Ok(connection) => connection,
+                Err(err) => return Ok(Self::upstream_error_response(err)),
+            };
             tokio::task::spawn(async move {
                 if let Err(err) = conn.await {
                     println!("Connection failed: {:?}", err);
                 }
             });
 
-            let resp = sender.send_request(req).await?;
+            let resp = match sender.send_request(req).await {
+                Ok(response) => response,
+                Err(err) => return Ok(Self::upstream_error_response(err)),
+            };
             Ok(resp.map(|b| b.boxed()))
         }
+    }
+
+    fn upstream_error_response(err: hyper::Error) -> Response<BoxBody<Bytes, hyper::Error>> {
+        warn!(%err, "Destination HTTP exchange failed");
+        Self::error_response(if err.is_timeout() {
+            http::StatusCode::GATEWAY_TIMEOUT
+        } else {
+            http::StatusCode::BAD_GATEWAY
+        })
+    }
+
+    fn error_response(status: http::StatusCode) -> Response<BoxBody<Bytes, hyper::Error>> {
+        let message = match status {
+            http::StatusCode::BAD_REQUEST => "Invalid proxy request",
+            http::StatusCode::GATEWAY_TIMEOUT => "Destination timed out",
+            _ => "Destination unavailable",
+        };
+        let mut response = Response::new(
+            Full::new(Bytes::from_static(message.as_bytes()))
+                .map_err(|never| match never {})
+                .boxed(),
+        );
+        *response.status_mut() = status;
+        // An upload may still have unread bytes when its destination fails.
+        response
+            .headers_mut()
+            .insert(http::header::CONNECTION, http::HeaderValue::from_static("close"));
+        response
     }
 
     fn host_addr(uri: &http::Uri) -> Option<String> {
         uri.authority().map(|auth| auth.to_string())
     }
 
-    // Create a TCP connection to host:port, build a tunnel between the connection and
-    // the upgraded connection
-    async fn tunnel(upgraded: Upgraded, addr: String) -> std::io::Result<()> {
-        // Connect to remote server
-        let mut server = TcpStream::connect(addr).await?;
+    // Forward traffic through the destination connection established before the 200.
+    async fn tunnel(upgraded: Upgraded, mut server: TcpStream) -> std::io::Result<()> {
         let mut upgraded = TokioIo::new(upgraded);
 
         // Proxying data
