@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{future::Future, net::SocketAddr, sync::Arc};
 
 use crate::ExecutionStatus;
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
@@ -6,16 +6,49 @@ use hyper::{Method, Request, Response, body::Bytes, client, server, service::ser
 use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpStream, ToSocketAddrs, lookup_host},
     task::JoinHandle,
 };
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{error, info, warn};
 
 use crate::commands::CommandError;
 
+#[cfg(test)]
+#[path = "lifecycle_tests.rs"]
+mod lifecycle_tests;
+
 pub struct ProxyServer {
     pub config: Arc<ProxyConfig>,
-    join_handle: JoinHandle<()>,
+    cancel: CancellationToken,
+    join_handle: Option<JoinHandle<()>>,
+}
+
+// Shared by the listener, HTTP connections and CONNECT tunnels.
+#[derive(Clone)]
+struct ProxyRuntime {
+    listener: SocketAddr,
+    cancel: CancellationToken,
+    tasks: TaskTracker,
+}
+
+impl ProxyRuntime {
+    fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
+        let cancel = self.cancel.clone();
+        self.tasks.spawn(async move {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {},
+                _ = future => {},
+            }
+        });
+    }
+}
+
+impl Drop for ProxyServer {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -43,9 +76,7 @@ pub enum ProxyMode {
 }
 
 impl ProxyServer {
-    pub async fn new(config: ProxyConfig) -> Result<Self, CommandError> {
-        let config = Arc::new(config);
-        let server_config = Arc::clone(&config);
+    pub async fn new(mut config: ProxyConfig) -> Result<Self, CommandError> {
         info!("Starting proxy server on http://{}:{}", &config.host, &config.port);
         let listener = TcpListener::bind((config.host.clone(), config.port))
             .await
@@ -55,25 +86,44 @@ impl ProxyServer {
                 cause: err,
             })?;
 
+        let address = listener.local_addr().map_err(|cause| CommandError::ServerStart {
+            host: config.host.clone(),
+            port: config.port,
+            cause,
+        })?;
+        config.port = address.port();
+        let cancel = CancellationToken::new();
+        let runtime = ProxyRuntime {
+            listener: address,
+            cancel: cancel.clone(),
+            tasks: TaskTracker::new(),
+        };
+
         let handle = tokio::task::spawn(async move {
             loop {
-                let (stream, _) = match listener.accept().await {
+                let accepted = tokio::select! {
+                    biased;
+                    _ = runtime.cancel.cancelled() => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let (stream, _) = match accepted {
                     Ok(connection) => connection,
                     Err(err) => {
                         error!(%err, "Proxy listener stopped after an accept error");
+                        runtime.cancel.cancel();
                         break;
                     }
                 };
                 let io = TokioIo::new(stream);
-                let server_config = Arc::clone(&server_config);
+                let connection_runtime = runtime.clone();
 
-                tokio::task::spawn(async move {
+                runtime.spawn(async move {
                     if let Err(err) = server::conn::http1::Builder::new()
                         .preserve_header_case(true)
                         .title_case_headers(true)
                         .serve_connection(
                             io,
-                            service_fn(move |req| Self::proxy_req(req, Arc::clone(&server_config))),
+                            service_fn(move |req| Self::proxy_req(req, connection_runtime.clone())),
                         )
                         .with_upgrades()
                         .await
@@ -82,15 +132,24 @@ impl ProxyServer {
                     }
                 });
             }
+            drop(listener);
+            runtime.tasks.close();
+            runtime.tasks.wait().await;
         });
         Ok(ProxyServer {
-            config: config,
-            join_handle: handle,
+            config: Arc::new(config),
+            cancel,
+            join_handle: Some(handle),
         })
     }
 
-    pub fn shutdown(&self) {
-        self.join_handle.abort();
+    pub async fn shutdown(&mut self) {
+        self.cancel.cancel();
+        if let Some(handle) = self.join_handle.take() {
+            if let Err(err) = handle.await {
+                error!(%err, "Proxy listener task failed during shutdown");
+            }
+        }
         info!(
             "Proxy server {}:{} shutdown successfully.",
             self.config.host, self.config.port
@@ -98,7 +157,7 @@ impl ProxyServer {
     }
 
     pub fn proxy_status(&self) -> ExecutionStatus {
-        if self.join_handle.is_finished() {
+        if self.cancel.is_cancelled() || self.join_handle.as_ref().is_none_or(|handle| handle.is_finished()) {
             return ExecutionStatus::Fail;
         } else {
             return ExecutionStatus::Success;
@@ -107,7 +166,7 @@ impl ProxyServer {
 
     async fn proxy_req(
         mut req: Request<hyper::body::Incoming>,
-        _: Arc<ProxyConfig>,
+        runtime: ProxyRuntime,
     ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
         // Client proxy credentials must never be forwarded to the destination.
         req.headers_mut().remove(http::header::PROXY_AUTHORIZATION);
@@ -128,19 +187,11 @@ impl ProxyServer {
             // `on_upgrade` future.
             if let Some(addr) = Self::host_addr(req.uri()) {
                 // Establish the destination connection before acknowledging CONNECT.
-                let stream = match TcpStream::connect(addr).await {
+                let stream = match Self::connect_destination(addr, runtime.listener).await {
                     Ok(stream) => stream,
-                    Err(err) => {
-                        warn!(%err, "CONNECT destination connection failed");
-                        let status = if err.kind() == std::io::ErrorKind::TimedOut {
-                            http::StatusCode::GATEWAY_TIMEOUT
-                        } else {
-                            http::StatusCode::BAD_GATEWAY
-                        };
-                        return Ok(Self::error_response(status));
-                    }
+                    Err(status) => return Ok(Self::error_response(status)),
                 };
-                tokio::task::spawn(async move {
+                runtime.spawn(async move {
                     match hyper::upgrade::on(req).await {
                         Ok(upgraded) => {
                             if let Err(e) = Self::tunnel(upgraded, stream).await {
@@ -173,17 +224,10 @@ impl ProxyServer {
             };
             let port = req.uri().port_u16().unwrap_or(80);
 
-            let stream = match TcpStream::connect((host, port)).await {
+            let host = host.trim_start_matches('[').trim_end_matches(']');
+            let stream = match Self::connect_destination((host, port), runtime.listener).await {
                 Ok(stream) => stream,
-                Err(err) => {
-                    warn!(%err, "Destination connection failed");
-                    let status = if err.kind() == std::io::ErrorKind::TimedOut {
-                        http::StatusCode::GATEWAY_TIMEOUT
-                    } else {
-                        http::StatusCode::BAD_GATEWAY
-                    };
-                    return Ok(Self::error_response(status));
-                }
+                Err(status) => return Ok(Self::error_response(status)),
             };
             let io = TokioIo::new(stream);
 
@@ -196,7 +240,7 @@ impl ProxyServer {
                 Ok(connection) => connection,
                 Err(err) => return Ok(Self::upstream_error_response(err)),
             };
-            tokio::task::spawn(async move {
+            runtime.spawn(async move {
                 if let Err(err) = conn.await {
                     println!("Connection failed: {:?}", err);
                 }
@@ -207,6 +251,49 @@ impl ProxyServer {
                 Err(err) => return Ok(Self::upstream_error_response(err)),
             };
             Ok(resp.map(|b| b.boxed()))
+        }
+    }
+
+    async fn connect_destination(
+        address: impl ToSocketAddrs,
+        listener: SocketAddr,
+    ) -> Result<TcpStream, http::StatusCode> {
+        let addresses: Vec<_> = lookup_host(address)
+            .await
+            .map_err(Self::connection_error_status)?
+            .collect();
+        // Check all candidates before connecting. Reuse these IPs to avoid a
+        // second DNS lookup returning an unchecked listener address.
+        if addresses.iter().any(|address| Self::is_listener(*address, listener)) {
+            warn!("Blocked a destination pointing back to the proxy listener");
+            return Err(http::StatusCode::FORBIDDEN);
+        }
+        TcpStream::connect(addresses.as_slice())
+            .await
+            .map_err(Self::connection_error_status)
+    }
+
+    fn is_listener(address: SocketAddr, listener: SocketAddr) -> bool {
+        if address.port() != listener.port() {
+            return false;
+        }
+        let destination = address.ip().to_canonical();
+        let local = listener.ip().to_canonical();
+        if destination == local || destination.is_unspecified() {
+            return true;
+        }
+        // A wildcard listener also accepts connections on local interface IPs.
+        // Binding an ephemeral UDP socket checks local ownership without traffic.
+        local.is_unspecified()
+            && (destination.is_loopback() || std::net::UdpSocket::bind(SocketAddr::new(destination, 0)).is_ok())
+    }
+
+    fn connection_error_status(err: std::io::Error) -> http::StatusCode {
+        warn!(%err, "Destination resolution or connection failed");
+        if err.kind() == std::io::ErrorKind::TimedOut {
+            http::StatusCode::GATEWAY_TIMEOUT
+        } else {
+            http::StatusCode::BAD_GATEWAY
         }
     }
 
@@ -222,6 +309,7 @@ impl ProxyServer {
     fn error_response(status: http::StatusCode) -> Response<BoxBody<Bytes, hyper::Error>> {
         let message = match status {
             http::StatusCode::BAD_REQUEST => "Invalid proxy request",
+            http::StatusCode::FORBIDDEN => "Destination is the local proxy listener",
             http::StatusCode::GATEWAY_TIMEOUT => "Destination timed out",
             _ => "Destination unavailable",
         };

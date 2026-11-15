@@ -2946,6 +2946,7 @@ dependencies = [
  "tauri-plugin-opener",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
@@ -4008,6 +4009,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "libc",
  "pin-project-lite",
  "tokio",
