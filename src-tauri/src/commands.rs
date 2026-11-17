@@ -84,15 +84,15 @@ pub async fn start_proxy_pac_server(
     state: State<'_, Mutex<AppState>>,
     config: ProxyPacServerConfig,
 ) -> Result<String, CommandError> {
+    let mut state = state.lock().await;
+    if let Some(mut server) = state.proxy_pac_server.take() {
+        server.shutdown().await;
+    }
     let server = ProxyPacServer::new(config).await.map_err(|err| {
         error!("{err}");
         err
     })?;
 
-    let mut state = state.lock().await;
-    if let Some(pps) = &state.proxy_pac_server {
-        pps.shutdown();
-    }
     state.proxy_pac_server = Some(server);
 
     Ok("Proxy pac server started sucessfully".to_string())
@@ -100,9 +100,9 @@ pub async fn start_proxy_pac_server(
 
 #[tauri::command]
 pub async fn stop_proxy_pac_server(state: State<'_, Mutex<AppState>>) -> Result<String, CommandError> {
-    let state = state.lock().await;
-    if let Some(pps) = &state.proxy_pac_server {
-        pps.shutdown();
+    let mut state = state.lock().await;
+    if let Some(mut server) = state.proxy_pac_server.take() {
+        server.shutdown().await;
     } else {
         let message = "Proxy pac server stopped command received but no proxy found started.";
         error!(message);

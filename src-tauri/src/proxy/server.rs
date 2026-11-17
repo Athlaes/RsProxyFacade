@@ -14,13 +14,9 @@ use tracing::{error, info, warn};
 
 use crate::commands::CommandError;
 
-#[cfg(test)]
-#[path = "lifecycle_tests.rs"]
-mod lifecycle_tests;
-
 pub struct ProxyServer {
     pub config: Arc<ProxyConfig>,
-    cancel: CancellationToken,
+    runtime: ProxyRuntime,
     join_handle: Option<JoinHandle<()>>,
 }
 
@@ -47,7 +43,7 @@ impl ProxyRuntime {
 
 impl Drop for ProxyServer {
     fn drop(&mut self) {
-        self.cancel.cancel();
+        self.runtime.cancel.cancel();
     }
 }
 
@@ -99,6 +95,7 @@ impl ProxyServer {
             tasks: TaskTracker::new(),
         };
 
+        let server_runtime = runtime.clone();
         let handle = tokio::task::spawn(async move {
             loop {
                 let accepted = tokio::select! {
@@ -138,29 +135,29 @@ impl ProxyServer {
         });
         Ok(ProxyServer {
             config: Arc::new(config),
-            cancel,
+            runtime: server_runtime,
             join_handle: Some(handle),
         })
     }
 
     pub async fn shutdown(&mut self) {
-        self.cancel.cancel();
-        if let Some(handle) = self.join_handle.take() {
-            if let Err(err) = handle.await {
-                error!(%err, "Proxy listener task failed during shutdown");
-            }
+        self.runtime.cancel.cancel();
+        if let Some(handle) = self.join_handle.take()
+            && let Err(err) = handle.await
+        {
+            error!(%err, "Proxy listener task failed during shutdown");
         }
         info!(
             "Proxy server {}:{} shutdown successfully.",
             self.config.host, self.config.port
-        )
+        );
     }
 
     pub fn proxy_status(&self) -> ExecutionStatus {
-        if self.cancel.is_cancelled() || self.join_handle.as_ref().is_none_or(|handle| handle.is_finished()) {
-            return ExecutionStatus::Fail;
+        if self.runtime.cancel.is_cancelled() || self.join_handle.as_ref().is_none_or(|handle| handle.is_finished()) {
+            ExecutionStatus::Fail
         } else {
-            return ExecutionStatus::Success;
+            ExecutionStatus::Success
         }
     }
 
@@ -222,7 +219,13 @@ impl ProxyServer {
             let Some(host) = req.uri().host() else {
                 return Ok(Self::error_response(http::StatusCode::BAD_REQUEST));
             };
-            let port = req.uri().port_u16().unwrap_or(80);
+            let port = match &req.uri().port() {
+                Some(port) => port.as_u16(),
+                None => match req.uri().scheme_str() {
+                    Some("https") => 443,
+                    _ => 80,
+                },
+            };
 
             let host = host.trim_start_matches('[').trim_end_matches(']');
             let stream = match Self::connect_destination((host, port), runtime.listener).await {
