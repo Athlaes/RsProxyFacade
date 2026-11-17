@@ -40,15 +40,16 @@ pub async fn start_proxy_server(
     state: State<'_, Mutex<AppState>>,
     config: ProxyConfig,
 ) -> Result<String, CommandError> {
+    // Serialize start/stop, and release the old port before binding the new one.
+    let mut state = state.lock().await;
+    if let Some(mut server) = state.proxy_server.take() {
+        server.shutdown().await;
+    }
     let server = ProxyServer::new(config).await.map_err(|err| {
         error!("{err}");
         err
     })?;
 
-    let mut state = state.lock().await;
-    if let Some(server) = &state.proxy_server {
-        server.shutdown();
-    }
     state.proxy_server = Some(server);
 
     Ok("Proxy server started sucessfully".to_string())
@@ -56,9 +57,9 @@ pub async fn start_proxy_server(
 
 #[tauri::command]
 pub async fn stop_proxy_server(state: State<'_, Mutex<AppState>>) -> Result<String, CommandError> {
-    let state = state.lock().await;
-    if let Some(jh) = &state.proxy_server {
-        jh.shutdown();
+    let mut state = state.lock().await;
+    if let Some(mut server) = state.proxy_server.take() {
+        server.shutdown().await;
     } else {
         let message = "Proxy server stopped command received but no proxy found started.";
         error!(message);
@@ -83,15 +84,15 @@ pub async fn start_proxy_pac_server(
     state: State<'_, Mutex<AppState>>,
     config: ProxyPacServerConfig,
 ) -> Result<String, CommandError> {
+    let mut state = state.lock().await;
+    if let Some(mut server) = state.proxy_pac_server.take() {
+        server.shutdown().await;
+    }
     let server = ProxyPacServer::new(config).await.map_err(|err| {
         error!("{err}");
         err
     })?;
 
-    let mut state = state.lock().await;
-    if let Some(pps) = &state.proxy_pac_server {
-        pps.shutdown();
-    }
     state.proxy_pac_server = Some(server);
 
     Ok("Proxy pac server started sucessfully".to_string())
@@ -99,9 +100,9 @@ pub async fn start_proxy_pac_server(
 
 #[tauri::command]
 pub async fn stop_proxy_pac_server(state: State<'_, Mutex<AppState>>) -> Result<String, CommandError> {
-    let state = state.lock().await;
-    if let Some(pps) = &state.proxy_pac_server {
-        pps.shutdown();
+    let mut state = state.lock().await;
+    if let Some(mut server) = state.proxy_pac_server.take() {
+        server.shutdown().await;
     } else {
         let message = "Proxy pac server stopped command received but no proxy found started.";
         error!(message);

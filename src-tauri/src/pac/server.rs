@@ -12,7 +12,8 @@ use hyper::{
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use tokio::{net::TcpListener, task::JoinHandle};
-use tracing::info;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tracing::{error, info, warn};
 
 use crate::{ExecutionStatus, commands::CommandError, pac::loaders};
 
@@ -26,7 +27,20 @@ pub struct ProxyPacServerConfig {
 
 pub struct ProxyPacServer {
     config: Arc<ProxyPacServerConfig>,
-    join_handle: JoinHandle<()>,
+    runtime: PacRuntime,
+    join_handle: Option<JoinHandle<()>>,
+}
+
+#[derive(Clone)]
+struct PacRuntime {
+    cancel: CancellationToken,
+    tasks: TaskTracker,
+}
+
+impl Drop for ProxyPacServer {
+    fn drop(&mut self) {
+        self.runtime.cancel.cancel();
+    }
 }
 
 impl ProxyPacServer {
@@ -51,18 +65,33 @@ impl ProxyPacServer {
                 port: config.port,
                 cause: err,
             })?;
+        let runtime = PacRuntime {
+            cancel: CancellationToken::new(),
+            tasks: TaskTracker::new(),
+        };
+        let server_runtime = runtime.clone();
         let handle = tokio::task::spawn(async move {
             loop {
-                let (stream, _) = listener
-                    .accept()
-                    .await
-                    .unwrap_or_else(|err| panic!("Proxy pac tcp listener unable to accept any connection : {err}"));
+                let accepted = tokio::select! {
+                    biased;
+                    _ = runtime.cancel.cancelled() => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let (stream, _) = match accepted {
+                    Ok(connection) => connection,
+                    Err(err) => {
+                        error!(%err, "PAC listener failed");
+                        runtime.cancel.cancel();
+                        break;
+                    }
+                };
                 let io = TokioIo::new(stream);
                 let server_config = Arc::clone(&server_config);
                 let pac_content = Arc::clone(&pac_content_shared);
 
-                tokio::task::spawn(async move {
-                    hyper::server::conn::http1::Builder::new()
+                let cancel = runtime.cancel.clone();
+                runtime.tasks.spawn(async move {
+                    let connection = hyper::server::conn::http1::Builder::new()
                         .preserve_header_case(true)
                         .title_case_headers(true)
                         .serve_connection(
@@ -71,20 +100,36 @@ impl ProxyPacServer {
                                 Self::serve_pac(req, Arc::clone(&server_config), Arc::clone(&pac_content))
                             }),
                         )
-                        .with_upgrades()
-                        .await
-                        .unwrap_or_else(|err| panic!("Proxy server unable to process requests : {err}"));
+                        .with_upgrades();
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {},
+                        result = connection => {
+                            if let Err(err) = result {
+                                warn!(%err, "PAC client connection failed");
+                            }
+                        },
+                    }
                 });
             }
+            drop(listener);
+            runtime.tasks.close();
+            runtime.tasks.wait().await;
         });
         Ok(ProxyPacServer {
-            config: config,
-            join_handle: handle,
+            config,
+            runtime: server_runtime,
+            join_handle: Some(handle),
         })
     }
 
-    pub fn shutdown(&self) {
-        self.join_handle.abort();
+    pub async fn shutdown(&mut self) {
+        self.runtime.cancel.cancel();
+        if let Some(handle) = self.join_handle.take()
+            && let Err(err) = handle.await
+        {
+            error!(%err, "PAC listener task failed during shutdown");
+        }
         info!(
             "Proxy server {}:{} shutdown successfully.",
             self.config.host, self.config.port
@@ -92,10 +137,10 @@ impl ProxyPacServer {
     }
 
     pub fn proxy_status(&self) -> ExecutionStatus {
-        if self.join_handle.is_finished() {
-            return ExecutionStatus::Fail;
+        if self.runtime.cancel.is_cancelled() || self.join_handle.as_ref().is_none_or(|handle| handle.is_finished()) {
+            ExecutionStatus::Fail
         } else {
-            return ExecutionStatus::Success;
+            ExecutionStatus::Success
         }
     }
 

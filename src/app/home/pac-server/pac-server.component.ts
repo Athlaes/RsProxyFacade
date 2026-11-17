@@ -14,6 +14,7 @@ import { debounceTime } from "rxjs";
 import { toSignal } from "@angular/core/rxjs-interop";
 import { BadgeStatus } from "../../shared/components/design-system/badge/badge.component";
 import { ServerService } from "../../shared/services/server.service";
+import { integerValidator } from "../../shared/config/validators";
 
 type CreateProxyPacForm = {
   host: FormControl<string>;
@@ -46,9 +47,9 @@ export class PacServerComponent {
       nonNullable: true,
       validators: [Validators.required],
     }),
-    port: new FormControl(Number.parseInt(localStorage.getItem("server_pac_form_port") ?? "3129"), {
+    port: new FormControl(Number(localStorage.getItem("server_pac_form_port") ?? "3129"), {
       nonNullable: true,
-      validators: [Validators.required],
+      validators: [Validators.required, Validators.max(65535), Validators.min(1), integerValidator],
     }),
     pacUrl: new FormControl(localStorage.getItem("server_pac_form_proxy_pac_url") ?? "", {
       nonNullable: true,

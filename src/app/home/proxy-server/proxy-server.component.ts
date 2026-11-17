@@ -17,6 +17,7 @@ import { PanelSectionComponent } from "../../shared/components/design-system/exp
 import { BadgeStatus } from "../../shared/components/design-system/badge/badge.component";
 import { MatSlideToggleModule } from "@angular/material/slide-toggle";
 import { ServerService } from "../../shared/services/server.service";
+import { integerValidator } from "../../shared/config/validators";
 
 type ProxyModeOptions = "Direct" | "System" | "Manual" | "Pac";
 
@@ -62,9 +63,9 @@ export class ProxyServerComponent {
       nonNullable: true,
       validators: [Validators.required],
     }),
-    port: new FormControl(Number.parseInt(localStorage.getItem("server_form_port") ?? "3128"), {
+    port: new FormControl(Number(localStorage.getItem("server_form_port") ?? "3128"), {
       nonNullable: true,
-      validators: [Validators.max(65535), Validators.min(0), Validators.required],
+      validators: [Validators.max(65535), Validators.min(1), Validators.required, integerValidator],
     }),
     proxyMode: new FormControl<ProxyModeOptions>(
       (localStorage.getItem("server_form_proxy_mode") as ProxyModeOptions) ?? "Direct",
@@ -77,9 +78,9 @@ export class ProxyServerComponent {
       nonNullable: true,
       validators: [],
     }),
-    proxyPort: new FormControl(Number.parseInt(localStorage.getItem("server_form_proxy_port") ?? "0"), {
+    proxyPort: new FormControl(Number(localStorage.getItem("server_form_proxy_port") ?? "0"), {
       nonNullable: true,
-      validators: [Validators.max(65535), Validators.min(0)],
+      validators: [Validators.max(65535), Validators.min(1), integerValidator],
     }),
     proxyPacUrl: new FormControl(localStorage.getItem("server_form_proxy_pac_url") ?? "", {
       nonNullable: true,
@@ -131,12 +132,12 @@ export class ProxyServerComponent {
   });
 
   private readonly syncWithLocalStorage = effect(() => {
-    const proxyForm = this.createProxyFormChange();
-    if (!proxyForm) return;
+    if (!this.createProxyFormChange()) return;
+    const proxyForm = this.createProxyForm.getRawValue();
     localStorage.setItem("server_form_host", proxyForm?.host ?? "");
     localStorage.setItem("server_form_port", (proxyForm?.port ?? 3128).toString());
     localStorage.setItem("server_form_proxy_host", proxyForm?.proxyHost ?? "");
-    localStorage.setItem("server_form_proxy_port", proxyForm?.proxyPacUrl ?? "");
+    localStorage.setItem("server_form_proxy_port", (proxyForm?.proxyPort ?? "1").toString());
     localStorage.setItem("server_form_proxy_username", proxyForm?.proxyUsername ?? "");
     localStorage.setItem("server_form_proxy_password", proxyForm?.proxyPassword ?? "");
     localStorage.setItem("server_form_proxy_pac_url", proxyForm?.proxyPacUrl ?? "");
