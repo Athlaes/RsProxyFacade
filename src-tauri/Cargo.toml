@@ -7,36 +7,46 @@ edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
+crate-type = ["cdylib", "rlib", "staticlib"]
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "rs_proxy_facade_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+async-trait = "0.1.92"
+display-error-chain = "0.2.2"
+http = "1.5.0"
+http-body-util = "0.1.5"
+hyper = { version = "1.12.0", features = ["full"] }
+hyper-util = { version = "0.1.21", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["full"] }
+tokio-util = { version = "0.7.20", features = ["rt"] }
+tracing = { version = "0.1.44", features = ["log"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
-[dependencies]
-tauri = { version = "2", features = [] }
-tauri-plugin-opener = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1.54.1", features = ["full"] }
-tokio-util = { version = "0.7.20", features = ["rt"] }
-hyper = { version = "1.12.0", features = ["full"] }
-hyper-util = { version = "0.1.21", features = ["full"] }
-http-body-util = "0.1.5"
-http = "1.5.0"
-thiserror = "2.0.21"
-tracing = { version = "0.1.44", features = ["log"] }
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-async-trait = "0.1.92"
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Networking_WinHttp", "Win32_Networking_WinInet"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+system-configuration = "0.7"
+core-foundation = "0.9"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gio = "0.18"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
-codegen-units = 1
-lto = true
 opt-level = 3
-panic = "abort"
 strip = true
+lto = true
+panic = "abort"
+codegen-units = 1

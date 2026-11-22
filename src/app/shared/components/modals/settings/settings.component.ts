@@ -30,6 +30,7 @@ export class SettingsComponent {
     startAppOnOsStart: new FormControl(false, { nonNullable: true }),
     minimizeToTaskbar: new FormControl(false, { nonNullable: true }),
     forceSystemToUseExposedProxyPac: new FormControl(false, { nonNullable: false }),
+    setSystemHttpEnvVarToRsProxyFacade: new FormControl(false, { nonNullable: false }),
   });
 
   selectedCategorie = signal(settings.categories.find((c) => c.name === "general"));

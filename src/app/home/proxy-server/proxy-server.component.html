@@ -42,24 +42,6 @@
                                     />
                                 </mat-form-field>
                             </div>
-                            <div class="app-form-row">
-                                <mat-form-field class="full-length">
-                                    <mat-label>Username</mat-label>
-                                    <input
-                                        type="text"
-                                        matInput
-                                        [formControl]="createProxyForm.controls['proxyUsername']"
-                                    />
-                                </mat-form-field>
-                                <mat-form-field class="full-length">
-                                    <mat-label>Password</mat-label>
-                                    <input
-                                        type="password"
-                                        matInput
-                                        [formControl]="createProxyForm.controls['proxyPassword']"
-                                    />
-                                </mat-form-field>
-                            </div>
                         </mat-tab>
                     }
                     @if (tabName === "Pac") {

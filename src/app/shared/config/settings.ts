@@ -13,6 +13,7 @@ export type ParameterName =
   | "startPacServerOnAppStart"
   | "startAppOnOsStart"
   | "minimizeToTaskbar"
+  | "setSystemHttpEnvVarToRsProxyFacade"
   | "forceSystemToUseExposedProxyPac";
 
 export interface Parameter {
@@ -56,6 +57,13 @@ export const settings: Settings = {
           type: "bool",
           label: "Force system to use exposed proxy pac when server is started",
           name: "forceSystemToUseExposedProxyPac",
+          value: false,
+        },
+        {
+          type: "bool",
+          label:
+            "Set system proxy env vars when proxy server starts (memorize previous config and restore it when server stop)",
+          name: "setSystemHttpEnvVarToRsProxyFacade",
           value: false,
         },
       ],

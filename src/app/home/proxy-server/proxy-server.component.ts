@@ -27,8 +27,6 @@ type CreateProxyForm = {
   proxyMode: FormControl<ProxyModeOptions>;
   proxyHost: FormControl<string>;
   proxyPort: FormControl<number>;
-  proxyUsername: FormControl<string>;
-  proxyPassword: FormControl<string>;
   proxyPacUrl: FormControl<string>;
   useExposedPacServer: FormControl<boolean>;
 };
@@ -86,14 +84,6 @@ export class ProxyServerComponent {
       nonNullable: true,
       validators: [],
     }),
-    proxyUsername: new FormControl(localStorage.getItem("server_form_proxy_username") ?? "", {
-      nonNullable: true,
-      validators: [],
-    }),
-    proxyPassword: new FormControl(localStorage.getItem("server_form_proxy_password") ?? "", {
-      nonNullable: true,
-      validators: [],
-    }),
     useExposedPacServer: new FormControl(localStorage.getItem("server_form_proxy_use_exposed_pac_server") === "true", {
       nonNullable: true,
       validators: [],
@@ -138,8 +128,6 @@ export class ProxyServerComponent {
     localStorage.setItem("server_form_port", (proxyForm?.port ?? 3128).toString());
     localStorage.setItem("server_form_proxy_host", proxyForm?.proxyHost ?? "");
     localStorage.setItem("server_form_proxy_port", (proxyForm?.proxyPort ?? "1").toString());
-    localStorage.setItem("server_form_proxy_username", proxyForm?.proxyUsername ?? "");
-    localStorage.setItem("server_form_proxy_password", proxyForm?.proxyPassword ?? "");
     localStorage.setItem("server_form_proxy_pac_url", proxyForm?.proxyPacUrl ?? "");
     localStorage.setItem("server_form_proxy_use_exposed_pac_server", String(proxyForm?.useExposedPacServer ?? false));
   });
@@ -232,8 +220,6 @@ export class ProxyServerComponent {
           manual: {
             host: createProxyForm.controls.proxyHost.getRawValue(),
             port: createProxyForm.controls.proxyPort.getRawValue(),
-            username: createProxyForm.controls.proxyUsername.getRawValue(),
-            password: createProxyForm.controls.proxyPassword.getRawValue(),
           },
         };
       case "Pac":
