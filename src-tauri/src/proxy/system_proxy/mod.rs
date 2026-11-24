@@ -21,6 +21,6 @@ pub enum SystemProxyError {
 #[derive(Serialize)]
 pub enum SystemProxy {
     Direct,
-    Auto { url: String },
+    Pac { url: String },
     Manual { host: String, port: u16, bypass: String },
 }
