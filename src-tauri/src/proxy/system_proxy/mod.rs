@@ -9,7 +9,14 @@ mod macos;
 mod windows;
 
 #[derive(Error, Debug, Serialize)]
-pub enum SystemProxyError {}
+pub enum SystemProxyError {
+    #[error(transparent)]
+    ReadingSystem(
+        #[from]
+        #[serde(skip_serializing)]
+        Box<dyn std::error::Error>,
+    ),
+}
 
 #[derive(Serialize)]
 pub enum SystemProxy {

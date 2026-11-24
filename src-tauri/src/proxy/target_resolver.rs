@@ -37,3 +37,5 @@ pub fn resolve_destination(req: &Request<Incoming>, config: &ProxyConfig) -> Res
         ProxyMode::Pac { url } => todo!(),
     }
 }
+
+fn resolve_direct(req: &Request<Incoming>) -> Result<String>

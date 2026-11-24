@@ -167,6 +167,12 @@ impl ProxyServer {
         // Client proxy credentials must never be forwarded to the destination.
         req.headers_mut().remove(http::header::PROXY_AUTHORIZATION);
 
+        match target_resolver::resolve_destination(&req, &config) {
+            Ok(addr) => {}
+            Err(err) => {
+                error!("{}", err.chain());
+            }
+        }
         let Ok(addr) = target_resolver::resolve_destination(&req, &config) else {
             warn!("Request has no destination");
             return Ok(Self::error_response(http::StatusCode::BAD_REQUEST));

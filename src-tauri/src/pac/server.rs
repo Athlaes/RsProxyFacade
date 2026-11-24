@@ -144,7 +144,7 @@ impl ProxyPacServer {
         if let Some(handle) = self.join_handle.take()
             && let Err(err) = handle.await
         {
-            return Err(PacServerError::from(err));
+            return Err(err.into());
         }
         Ok(())
     }
