@@ -84,12 +84,6 @@ impl SystemProxy {
         // Automatic discovery (fAutoDetect / WPAD) is deliberately ignored for now.
         Ok(Self::Direct)
     }
-
-    pub fn set_system_proxy(&self) -> Result<(), SystemProxyError> {
-        Err(SystemProxyError::ReadingSystem(
-            "Writing system proxy settings is not implemented".into(),
-        ))
-    }
 }
 
 #[cfg(test)]

@@ -5,10 +5,7 @@ export interface ProxyServerConfig {
 }
 
 export type ProxyMode =
-  | "direct"
-  | "system"
-  | { manual: { host: string; port: number; username?: string; password?: string } }
-  | { pac: { url: string } };
+  "direct" | "system" | { manual: { host: string; port: number; bypass: string } } | { pac: { url: string } };
 
 export interface ProxyPacServerConfig {
   host: string;

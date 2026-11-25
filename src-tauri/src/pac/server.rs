@@ -48,7 +48,6 @@ pub enum PacServerError {
 }
 
 pub struct ProxyPacServer {
-    config: Arc<ProxyPacServerConfig>,
     runtime: PacRuntime,
     join_handle: Option<JoinHandle<()>>,
 }
@@ -72,7 +71,6 @@ impl ProxyPacServer {
         let pac_content = loader.load(&config.pac_url).await?;
 
         let pac_content_shared = Arc::new(pac_content);
-        let server_config = Arc::clone(&config);
         info!("Starting proxy_pac_server on http://{}:{}", &config.host, &config.port);
         let listener = TcpListener::bind((config.host.clone(), config.port))
             .await
@@ -102,7 +100,7 @@ impl ProxyPacServer {
                     }
                 };
                 let io = TokioIo::new(stream);
-                let server_config = Arc::clone(&server_config);
+                let server_config = Arc::clone(&config);
                 let pac_content = Arc::clone(&pac_content_shared);
 
                 let cancel = runtime.cancel.clone();
@@ -133,7 +131,6 @@ impl ProxyPacServer {
             runtime.tasks.wait().await;
         });
         Ok(ProxyPacServer {
-            config,
             runtime: server_runtime,
             join_handle: Some(handle),
         })

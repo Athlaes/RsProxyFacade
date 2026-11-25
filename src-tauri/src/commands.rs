@@ -51,7 +51,10 @@ pub async fn start_proxy_server(
     // Serialize start/stop, and release the old port before binding the new one.
     let mut state = state.lock().await;
     if let Some(mut server) = state.proxy_server.take() {
-        server.shutdown().await;
+        server.shutdown().await.map_err(|err| {
+            error!("{}", err.chain());
+            err
+        })?;
     }
     let server = ProxyServer::new(config).await.map_err(|err| {
         error!("{}", err.chain());
@@ -70,7 +73,7 @@ pub async fn stop_proxy_server(state: State<'_, Mutex<AppState>>) -> Result<Stri
         server.shutdown().await.map_err(|err| {
             error!("{}", err.chain());
             err
-        })?
+        })?;
     } else {
         let message = "Proxy server stopped command received but no proxy found started.";
         warn!(message);
@@ -97,7 +100,10 @@ pub async fn start_proxy_pac_server(
 ) -> Result<String, CommandError> {
     let mut state = state.lock().await;
     if let Some(mut server) = state.proxy_pac_server.take() {
-        server.shutdown().await;
+        server.shutdown().await.map_err(|err| {
+            error!("{}", err.chain());
+            err
+        })?;
     }
     let server = ProxyPacServer::new(config).await.map_err(|err| {
         error!("{}", err.chain());
@@ -113,7 +119,10 @@ pub async fn start_proxy_pac_server(
 pub async fn stop_proxy_pac_server(state: State<'_, Mutex<AppState>>) -> Result<String, CommandError> {
     let mut state = state.lock().await;
     if let Some(mut server) = state.proxy_pac_server.take() {
-        server.shutdown().await;
+        server.shutdown().await.map_err(|err| {
+            error!("{}", err.chain());
+            err
+        })?;
     } else {
         let message = "Proxy pac server stopped command received but no proxy found started.";
         warn!(message);

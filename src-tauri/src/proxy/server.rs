@@ -1,5 +1,6 @@
-use std::{future::Future, net::SocketAddr, sync::Arc};
+use std::{future::Future, net::SocketAddr, sync::Arc, time::Duration};
 
+use crate::proxy::target_resolver::ResolvedDestination;
 use crate::{ExecutionStatus, commands::ProxyConfig, proxy::target_resolver};
 use display_error_chain::ErrorChainExt;
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
@@ -10,9 +11,12 @@ use tokio::{
     io,
     net::{TcpListener, TcpStream, ToSocketAddrs, lookup_host},
     task::{JoinError, JoinHandle},
+    time::timeout,
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{error, info, warn};
+
+const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(thiserror::Error, Debug, Serialize)]
 pub enum ProxyServerError {
@@ -164,66 +168,194 @@ impl ProxyServer {
         config: Arc<ProxyConfig>,
         runtime: Arc<ProxyRuntime>,
     ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
-        // Client proxy credentials must never be forwarded to the destination.
         req.headers_mut().remove(http::header::PROXY_AUTHORIZATION);
-
-        let addr = match target_resolver::resolve_destination(&req, &config) {
-            Ok(addr) => addr,
-            Err(err) => {
-                error!("{}", err.chain());
-                return Ok(Self::error_response(http::StatusCode::BAD_REQUEST));
+        let route = match target_resolver::resolve_destination(&req, &config) {
+            Ok(route) => route,
+            Err(_) => return Ok(Self::error_response(http::StatusCode::BAD_GATEWAY)),
+        };
+        let connect = req.method() == Method::CONNECT;
+        let Some(authority) = req.uri().authority().cloned() else {
+            return Ok(Self::error_response(http::StatusCode::BAD_REQUEST));
+        };
+        if authority.as_str().contains('@')
+            || (connect && authority.port_u16().is_none())
+            || (!connect && req.uri().scheme_str() != Some("http"))
+        {
+            return Ok(Self::error_response(http::StatusCode::BAD_REQUEST));
+        }
+        let destination_host = authority.host().trim_start_matches('[').trim_end_matches(']');
+        let destination_port = authority.port_u16().unwrap_or(80);
+        let (peer_host, peer_port) = match &route {
+            ResolvedDestination::Direct => (destination_host, destination_port),
+            ResolvedDestination::HttpProxy { host, port } => {
+                (host.trim_start_matches('[').trim_end_matches(']'), *port)
             }
         };
+        let stream = match timeout(
+            UPSTREAM_TIMEOUT,
+            Self::connect_destination((peer_host, peer_port), runtime.listener),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(status)) => return Ok(Self::error_response(status)),
+            Err(_) => return Ok(Self::error_response(http::StatusCode::GATEWAY_TIMEOUT)),
+        };
 
-        if Method::CONNECT == req.method() {
-            // Establish the destination connection before acknowledging CONNECT.
-            let stream = match Self::connect_destination(addr, runtime.listener).await {
-                Ok(stream) => stream,
-                Err(status) => return Ok(Self::error_response(status)),
-            };
-            runtime.spawn(async move {
-                match hyper::upgrade::on(req).await {
-                    Ok(upgraded) => {
-                        if let Err(e) = Self::tunnel(upgraded, stream).await {
-                            eprintln!("server io error: {}", e);
-                        };
+        if connect {
+            match &route {
+                ResolvedDestination::Direct => Self::spawn_tunnel(req, stream, &runtime),
+                ResolvedDestination::HttpProxy { .. } => {
+                    let tunnel = timeout(
+                        UPSTREAM_TIMEOUT,
+                        Self::connect_upstream(stream, authority.as_str(), &runtime),
+                    )
+                    .await;
+                    match tunnel {
+                        Ok(Ok(upgraded)) => Self::spawn_tunnel(req, TokioIo::new(upgraded), &runtime),
+                        Ok(Err(status)) => return Ok(Self::error_response(status)),
+                        Err(_) => return Ok(Self::error_response(http::StatusCode::GATEWAY_TIMEOUT)),
                     }
-                    Err(e) => eprintln!("upgrade error: {}", e),
                 }
-            });
-
-            Ok(Response::new(
+            }
+            return Ok(Response::new(
                 Empty::<Bytes>::new()
                     .map_err(|never| -> hyper::Error { match never {} })
                     .boxed(),
-            ))
-        } else {
-            let stream = match Self::connect_destination(addr, runtime.listener).await {
-                Ok(stream) => stream,
-                Err(status) => return Ok(Self::error_response(status)),
-            };
-            let io = TokioIo::new(stream);
+            ));
+        }
 
-            let (mut sender, conn) = match client::conn::http1::Builder::new()
-                .preserve_header_case(true)
-                .title_case_headers(true)
-                .handshake(io)
-                .await
-            {
-                Ok(connection) => connection,
-                Err(err) => return Ok(Self::upstream_error_response(err)),
+        // Origins expect origin-form; forward proxies expect absolute-form.
+        if matches!(route, ResolvedDestination::Direct) {
+            let path = req.uri().path_and_query().map(|path| path.as_str()).unwrap_or("/");
+            let uri = match path.parse() {
+                Ok(uri) => uri,
+                Err(_) => return Ok(Self::error_response(http::StatusCode::BAD_REQUEST)),
             };
-            runtime.spawn(async move {
-                if let Err(err) = conn.await {
-                    println!("Connection failed: {:?}", err);
-                }
+            *req.uri_mut() = uri;
+        }
+        Self::strip_hop_headers(req.headers_mut());
+        let host_header = match http::HeaderValue::from_str(authority.as_str()) {
+            Ok(value) => value,
+            Err(_) => return Ok(Self::error_response(http::StatusCode::BAD_REQUEST)),
+        };
+        req.headers_mut().insert(http::header::HOST, host_header);
+        let (mut sender, conn) = match client::conn::http1::handshake(TokioIo::new(stream)).await {
+            Ok(connection) => connection,
+            Err(err) => return Ok(Self::upstream_error_response(err)),
+        };
+        let connection_cancel = CancellationToken::new();
+        let connection_guard = connection_cancel.clone().drop_guard();
+        runtime.spawn(async move {
+            tokio::select! {
+                _ = connection_cancel.cancelled() => {},
+                result = conn => if let Err(err) = result { warn!(%err, "HTTP connection failed"); },
+            }
+        });
+        let mut response = match timeout(UPSTREAM_TIMEOUT, sender.send_request(req)).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(err)) => return Ok(Self::upstream_error_response(err)),
+            Err(_) => return Ok(Self::error_response(http::StatusCode::GATEWAY_TIMEOUT)),
+        };
+        if response.status() == http::StatusCode::PROXY_AUTHENTICATION_REQUIRED {
+            // TODO: implement upstream authentication.
+            warn!("Proxy authentication required; returning 502");
+            return Ok(Self::error_response(http::StatusCode::BAD_GATEWAY));
+        }
+        // Upgrades other than CONNECT are not supported by this forwarding path.
+        if response.status() == http::StatusCode::SWITCHING_PROTOCOLS {
+            return Ok(Self::error_response(http::StatusCode::BAD_GATEWAY));
+        }
+        Self::strip_hop_headers(response.headers_mut());
+        response.headers_mut().remove(http::header::PROXY_AUTHENTICATE);
+        // Keep the driver alive for the streaming response; all earlier error paths
+        // cancel it, including an authentication rejection during an upload.
+        connection_guard.disarm();
+        Ok(response.map(|body| body.boxed()))
+    }
+
+    async fn connect_upstream(
+        stream: TcpStream,
+        authority: &str,
+        runtime: &ProxyRuntime,
+    ) -> Result<Upgraded, http::StatusCode> {
+        let (mut sender, conn) = client::conn::http1::handshake(TokioIo::new(stream))
+            .await
+            .map_err(|_| http::StatusCode::BAD_GATEWAY)?;
+        let connection_cancel = CancellationToken::new();
+        let _connection_guard = connection_cancel.clone().drop_guard();
+        runtime.spawn(async move {
+            tokio::select! {
+                _ = connection_cancel.cancelled() => {},
+                result = conn.with_upgrades() => if let Err(err) = result { warn!(%err, "Upstream CONNECT failed"); },
+            }
+        });
+        let request = Request::builder()
+            .method(Method::CONNECT)
+            .uri(authority)
+            .header(http::header::HOST, authority)
+            .body(Empty::<Bytes>::new())
+            .map_err(|_| http::StatusCode::BAD_REQUEST)?;
+        let response = sender
+            .send_request(request)
+            .await
+            .map_err(|_| http::StatusCode::BAD_GATEWAY)?;
+        if response.status() == http::StatusCode::PROXY_AUTHENTICATION_REQUIRED {
+            // TODO: implement upstream authentication.
+            warn!("Upstream CONNECT requires authentication; returning 502");
+            return Err(http::StatusCode::BAD_GATEWAY);
+        }
+        if !response.status().is_success() {
+            return Err(if response.status() == http::StatusCode::GATEWAY_TIMEOUT {
+                http::StatusCode::GATEWAY_TIMEOUT
+            } else {
+                http::StatusCode::BAD_GATEWAY
             });
+        }
+        // Keep Hyper's buffered tunnel bytes instead of extracting the raw TCP stream.
+        hyper::upgrade::on(response)
+            .await
+            .map_err(|_| http::StatusCode::BAD_GATEWAY)
+    }
 
-            let resp = match sender.send_request(req).await {
-                Ok(response) => response,
-                Err(err) => return Ok(Self::upstream_error_response(err)),
-            };
-            Ok(resp.map(|b| b.boxed()))
+    fn spawn_tunnel<T>(req: Request<hyper::body::Incoming>, stream: T, runtime: &ProxyRuntime)
+    where
+        T: io::AsyncRead + io::AsyncWrite + Unpin + Send + 'static,
+    {
+        runtime.spawn(async move {
+            match hyper::upgrade::on(req).await {
+                Ok(upgraded) => {
+                    if let Err(err) = Self::tunnel(upgraded, stream).await {
+                        warn!(%err, "Tunnel failed");
+                    }
+                }
+                Err(err) => warn!(%err, "Client upgrade failed"),
+            }
+        });
+    }
+
+    fn strip_hop_headers(headers: &mut http::HeaderMap) {
+        let nominated: Vec<_> = headers
+            .get_all(http::header::CONNECTION)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .filter_map(|name| http::HeaderName::from_bytes(name.trim().as_bytes()).ok())
+            .collect();
+        for name in nominated {
+            headers.remove(name);
+        }
+        for name in [
+            "connection",
+            "proxy-connection",
+            "keep-alive",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
+            "proxy-authorization",
+        ] {
+            headers.remove(name);
         }
     }
 
@@ -299,12 +431,11 @@ impl ProxyServer {
         response
     }
 
-    fn host_addr(uri: &http::Uri) -> Option<String> {
-        uri.authority().map(|auth| auth.to_string())
-    }
-
     // Forward traffic through the destination connection established before the 200.
-    async fn tunnel(upgraded: Upgraded, mut server: TcpStream) -> std::io::Result<()> {
+    async fn tunnel<T: io::AsyncRead + io::AsyncWrite + Unpin>(
+        upgraded: Upgraded,
+        mut server: T,
+    ) -> std::io::Result<()> {
         let mut upgraded = TokioIo::new(upgraded);
 
         // Proxying data
@@ -316,3 +447,7 @@ impl ProxyServer {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "server_tests.rs"]
+mod tests;
