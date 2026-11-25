@@ -24,7 +24,7 @@ use tracing::{error, info, warn};
 use crate::{
     ExecutionStatus,
     commands::ProxyPacServerConfig,
-    pac_loaders::{self, LoaderError},
+    pac_loader::{self, LoaderError},
 };
 
 #[derive(Error, Debug, Serialize)]
@@ -67,7 +67,7 @@ impl Drop for ProxyPacServer {
 impl ProxyPacServer {
     pub async fn new(config: ProxyPacServerConfig) -> Result<ProxyPacServer, PacServerError> {
         let config = Arc::new(config);
-        let loader = pac_loaders::get_loader(&config.pac_url)?;
+        let loader = pac_loader::get_loader(&config.pac_url)?;
         let pac_content = loader.load(&config.pac_url).await?;
 
         let pac_content_shared = Arc::new(pac_content);

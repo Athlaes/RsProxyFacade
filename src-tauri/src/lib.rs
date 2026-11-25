@@ -9,7 +9,7 @@ use crate::{pac::server::ProxyPacServer, proxy::server::ProxyServer};
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 mod commands;
 mod pac;
-mod pac_loaders;
+mod pac_loader;
 mod proxy;
 
 struct AppState {
