@@ -19,7 +19,7 @@ use tokio::{
     task::{JoinError, JoinHandle},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     ExecutionStatus,
@@ -68,7 +68,9 @@ impl ProxyPacServer {
     pub async fn new(config: ProxyPacServerConfig) -> Result<ProxyPacServer, PacServerError> {
         let config = Arc::new(config);
         let loader = pac_loader::get_loader(&config.pac_url)?;
+        debug!("Loading PAC script");
         let pac_content = loader.load(&config.pac_url).await?;
+        debug!(bytes = pac_content.len(), "PAC script loaded");
 
         let pac_content_shared = Arc::new(pac_content);
         info!("Starting proxy_pac_server on http://{}:{}", &config.host, &config.port);
@@ -91,7 +93,7 @@ impl ProxyPacServer {
                     _ = runtime.cancel.cancelled() => break,
                     accepted = listener.accept() => accepted,
                 };
-                let (stream, _) = match accepted {
+                let (stream, peer) = match accepted {
                     Ok(connection) => connection,
                     Err(err) => {
                         error!("{}", err.chain());
@@ -99,6 +101,7 @@ impl ProxyPacServer {
                         break;
                     }
                 };
+                debug!(%peer, "Accepted PAC client connection");
                 let io = TokioIo::new(stream);
                 let server_config = Arc::clone(&config);
                 let pac_content = Arc::clone(&pac_content_shared);
@@ -129,6 +132,7 @@ impl ProxyPacServer {
             drop(listener);
             runtime.tasks.close();
             runtime.tasks.wait().await;
+            debug!("PAC server stopped");
         });
         Ok(ProxyPacServer {
             runtime: server_runtime,
@@ -163,11 +167,13 @@ impl ProxyPacServer {
 
         if request.uri().path() != "/proxy.pac" {
             *response.status_mut() = StatusCode::NOT_FOUND;
+            debug!(method = %request.method(), status = %response.status(), "Unknown PAC endpoint");
             return Ok(response);
         }
 
         if request.method() != Method::GET && request.method() != Method::HEAD {
             *response.status_mut() = StatusCode::METHOD_NOT_ALLOWED;
+            debug!(method = %request.method(), status = %response.status(), "Unsupported PAC request method");
             response.headers_mut().insert(ALLOW, "GET, HEAD".parse().unwrap());
             return Ok(response);
         }
@@ -183,6 +189,7 @@ impl ProxyPacServer {
             *response.body_mut() = Full::new(Bytes::copy_from_slice(pac_content.as_bytes()));
         }
 
+        debug!(method = %request.method(), status = %response.status(), "PAC response ready");
         Ok(response)
     }
 }

@@ -14,7 +14,7 @@ use tokio::{
     time::timeout,
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -86,6 +86,7 @@ impl ProxyServer {
             source: err,
         })?;
         config.port = address.port();
+        debug!(%address, "Proxy listener bound");
         let cancel = CancellationToken::new();
         let runtime = Arc::new(ProxyRuntime {
             listener: address,
@@ -103,7 +104,7 @@ impl ProxyServer {
                     _ = runtime.cancel.cancelled() => break,
                     accepted = listener.accept() => accepted,
                 };
-                let (stream, _) = match accepted {
+                let (stream, peer) = match accepted {
                     Ok(connection) => connection,
                     Err(err) => {
                         error!("{}", err.chain());
@@ -111,6 +112,7 @@ impl ProxyServer {
                         break;
                     }
                 };
+                debug!(%peer, "Accepted proxy client connection");
                 let io = TokioIo::new(stream);
                 let connection_runtime = runtime.clone();
                 let config = config.clone();
@@ -185,12 +187,16 @@ impl ProxyServer {
         }
         let destination_host = authority.host().trim_start_matches('[').trim_end_matches(']');
         let destination_port = authority.port_u16().unwrap_or(80);
-        let (peer_host, peer_port) = match &route {
-            ResolvedDestination::Direct => (destination_host, destination_port),
+        let (peer_host, peer_port, route_kind) = match &route {
+            ResolvedDestination::Direct => (destination_host, destination_port, "direct"),
             ResolvedDestination::HttpProxy { host, port } => {
-                (host.trim_start_matches('[').trim_end_matches(']'), *port)
+                (host.trim_start_matches('[').trim_end_matches(']'), *port, "http_proxy")
             }
         };
+        debug!(
+            method = %req.method(), route = route_kind, destination_host, destination_port,
+            "Connecting to resolved route"
+        );
         let stream = match timeout(
             UPSTREAM_TIMEOUT,
             Self::connect_destination((peer_host, peer_port), runtime.listener),
@@ -257,6 +263,7 @@ impl ProxyServer {
             Ok(Err(err)) => return Ok(Self::upstream_error_response(err)),
             Err(_) => return Ok(Self::error_response(http::StatusCode::GATEWAY_TIMEOUT)),
         };
+        debug!(status = %response.status(), "Received HTTP response from destination route");
         if response.status() == http::StatusCode::PROXY_AUTHENTICATION_REQUIRED {
             // TODO: implement upstream authentication.
             warn!("Proxy authentication required; returning 502");
@@ -300,6 +307,7 @@ impl ProxyServer {
             .send_request(request)
             .await
             .map_err(|_| http::StatusCode::BAD_GATEWAY)?;
+        debug!(status = %response.status(), "Received upstream CONNECT response");
         if response.status() == http::StatusCode::PROXY_AUTHENTICATION_REQUIRED {
             // TODO: implement upstream authentication.
             warn!("Upstream CONNECT requires authentication; returning 502");
@@ -412,6 +420,7 @@ impl ProxyServer {
     }
 
     fn error_response(status: http::StatusCode) -> Response<BoxBody<Bytes, hyper::Error>> {
+        debug!(%status, "Returning proxy error response");
         let message = match status {
             http::StatusCode::BAD_REQUEST => "Invalid proxy request",
             http::StatusCode::FORBIDDEN => "Destination is the local proxy listener",
@@ -438,11 +447,9 @@ impl ProxyServer {
     ) -> std::io::Result<()> {
         let mut upgraded = TokioIo::new(upgraded);
 
-        // Proxying data
+        debug!("CONNECT tunnel established");
         let (from_client, from_server) = tokio::io::copy_bidirectional(&mut upgraded, &mut server).await?;
-
-        // Print message when done
-        println!("client wrote {} bytes and received {} bytes", from_client, from_server);
+        debug!(from_client, from_server, "CONNECT tunnel closed");
 
         Ok(())
     }
