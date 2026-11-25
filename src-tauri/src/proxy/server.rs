@@ -456,5 +456,5 @@ impl ProxyServer {
 }
 
 #[cfg(test)]
-#[path = "server_tests.rs"]
+#[path = "server.test.rs"]
 mod tests;
