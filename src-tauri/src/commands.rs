@@ -1,38 +1,46 @@
-use serde::Serialize;
+use display_error_chain::ErrorChainExt;
+use serde::{Deserialize, Serialize};
 use tauri::State;
-use thiserror::Error;
-use tokio::{io, sync::Mutex};
-use tracing::error;
+use tokio::sync::Mutex;
+use tracing::{error, warn};
 
 use crate::ExecutionStatus;
 
-use crate::pac::server::{ProxyPacServer, ProxyPacServerConfig};
-use crate::{
-    AppState,
-    proxy::server::{ProxyConfig, ProxyServer},
-};
+use crate::pac::server::{PacServerError, ProxyPacServer};
+use crate::proxy::server::ProxyServerError;
+use crate::{AppState, proxy::server::ProxyServer};
 
-#[derive(Error, Debug, Serialize)]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyPacServerConfig {
+    pub host: String,
+    pub port: u16,
+    pub pac_url: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyConfig {
+    pub host: String,
+    pub port: u16,
+    pub proxy_mode: ProxyMode,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProxyMode {
+    Direct,
+    System,
+    Manual { host: String, port: u16, bypass: String },
+    Pac { url: String },
+}
+
+#[derive(thiserror::Error, Debug, Serialize)]
 pub enum CommandError {
-    #[error("Error starting server on address {host}:{port}: {cause}")]
-    ServerStart {
-        host: String,
-        port: u16,
-        #[source]
-        #[serde(skip_serializing)]
-        cause: io::Error,
-    },
-    #[error("{0}")]
-    ServerStop(String),
-    #[error("Couldn't load pac file for path {path}")]
-    PacLoading {
-        path: String,
-        #[source]
-        #[serde(skip_serializing)]
-        cause: io::Error,
-    },
-    #[error("Couldn't load file with selector {selector}")]
-    LoadingMethodSelection { selector: String },
+    #[error(transparent)]
+    ProxyServer(#[from] ProxyServerError),
+    #[error(transparent)]
+    PacServer(#[from] PacServerError),
 }
 
 #[tauri::command]
@@ -43,10 +51,13 @@ pub async fn start_proxy_server(
     // Serialize start/stop, and release the old port before binding the new one.
     let mut state = state.lock().await;
     if let Some(mut server) = state.proxy_server.take() {
-        server.shutdown().await;
+        server.shutdown().await.map_err(|err| {
+            error!("{}", err.chain());
+            err
+        })?;
     }
     let server = ProxyServer::new(config).await.map_err(|err| {
-        error!("{err}");
+        error!("{}", err.chain());
         err
     })?;
 
@@ -59,11 +70,14 @@ pub async fn start_proxy_server(
 pub async fn stop_proxy_server(state: State<'_, Mutex<AppState>>) -> Result<String, CommandError> {
     let mut state = state.lock().await;
     if let Some(mut server) = state.proxy_server.take() {
-        server.shutdown().await;
+        server.shutdown().await.map_err(|err| {
+            error!("{}", err.chain());
+            err
+        })?;
     } else {
         let message = "Proxy server stopped command received but no proxy found started.";
-        error!(message);
-        return Err(CommandError::ServerStop(message.to_string()));
+        warn!(message);
+        return Ok(message.to_string());
     }
 
     Ok("Proxy server stopped sucessfully".to_string())
@@ -86,10 +100,13 @@ pub async fn start_proxy_pac_server(
 ) -> Result<String, CommandError> {
     let mut state = state.lock().await;
     if let Some(mut server) = state.proxy_pac_server.take() {
-        server.shutdown().await;
+        server.shutdown().await.map_err(|err| {
+            error!("{}", err.chain());
+            err
+        })?;
     }
     let server = ProxyPacServer::new(config).await.map_err(|err| {
-        error!("{err}");
+        error!("{}", err.chain());
         err
     })?;
 
@@ -102,11 +119,14 @@ pub async fn start_proxy_pac_server(
 pub async fn stop_proxy_pac_server(state: State<'_, Mutex<AppState>>) -> Result<String, CommandError> {
     let mut state = state.lock().await;
     if let Some(mut server) = state.proxy_pac_server.take() {
-        server.shutdown().await;
+        server.shutdown().await.map_err(|err| {
+            error!("{}", err.chain());
+            err
+        })?;
     } else {
         let message = "Proxy pac server stopped command received but no proxy found started.";
-        error!(message);
-        return Err(CommandError::ServerStop(message.to_string()));
+        warn!(message);
+        return Ok(message.to_string());
     }
 
     Ok("Proxy server stopped sucessfully".to_string())

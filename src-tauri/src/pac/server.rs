@@ -1,5 +1,6 @@
 use std::{convert::Infallible, sync::Arc};
 
+use display_error_chain::ErrorChainExt;
 use http::{
     Method, Request, Response, StatusCode,
     header::{ALLOW, CACHE_CONTROL, CONTENT_TYPE},
@@ -10,23 +11,43 @@ use hyper::{
     service::service_fn,
 };
 use hyper_util::rt::TokioIo;
-use serde::Deserialize;
-use tokio::{net::TcpListener, task::JoinHandle};
+use serde::Serialize;
+use thiserror::Error;
+use tokio::{
+    io,
+    net::TcpListener,
+    task::{JoinError, JoinHandle},
+};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{error, info, warn};
 
-use crate::{ExecutionStatus, commands::CommandError, pac::loaders};
+use crate::{
+    ExecutionStatus,
+    commands::ProxyPacServerConfig,
+    pac_loaders::{self, LoaderError},
+};
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProxyPacServerConfig {
-    host: String,
-    port: u16,
-    pac_url: String,
+#[derive(Error, Debug, Serialize)]
+pub enum PacServerError {
+    #[error(transparent)]
+    PacLoading(#[from] LoaderError),
+    #[error("Couldn't bind server to {host}:{port}")]
+    Binding {
+        host: String,
+        port: u16,
+        #[source]
+        #[serde(skip_serializing)]
+        source: io::Error,
+    },
+    #[error("Couldn't stop proxy pac server")]
+    Stopping(
+        #[from]
+        #[serde(skip_serializing)]
+        JoinError,
+    ),
 }
 
 pub struct ProxyPacServer {
-    config: Arc<ProxyPacServerConfig>,
     runtime: PacRuntime,
     join_handle: Option<JoinHandle<()>>,
 }
@@ -44,26 +65,19 @@ impl Drop for ProxyPacServer {
 }
 
 impl ProxyPacServer {
-    pub async fn new(config: ProxyPacServerConfig) -> Result<ProxyPacServer, CommandError> {
+    pub async fn new(config: ProxyPacServerConfig) -> Result<ProxyPacServer, PacServerError> {
         let config = Arc::new(config);
-        let loader = loaders::get_loader(&config.pac_url)?;
-        let pac_content = loader
-            .load(&config.pac_url)
-            .await
-            .map_err(|err| CommandError::PacLoading {
-                path: config.pac_url.clone(),
-                cause: err,
-            })?;
+        let loader = pac_loaders::get_loader(&config.pac_url)?;
+        let pac_content = loader.load(&config.pac_url).await?;
 
         let pac_content_shared = Arc::new(pac_content);
-        let server_config = Arc::clone(&config);
         info!("Starting proxy_pac_server on http://{}:{}", &config.host, &config.port);
         let listener = TcpListener::bind((config.host.clone(), config.port))
             .await
-            .map_err(|err| CommandError::ServerStart {
+            .map_err(|err| PacServerError::Binding {
                 host: config.host.to_string(),
                 port: config.port,
-                cause: err,
+                source: err,
             })?;
         let runtime = PacRuntime {
             cancel: CancellationToken::new(),
@@ -80,13 +94,13 @@ impl ProxyPacServer {
                 let (stream, _) = match accepted {
                     Ok(connection) => connection,
                     Err(err) => {
-                        error!(%err, "PAC listener failed");
+                        error!("{}", err.chain());
                         runtime.cancel.cancel();
                         break;
                     }
                 };
                 let io = TokioIo::new(stream);
-                let server_config = Arc::clone(&server_config);
+                let server_config = Arc::clone(&config);
                 let pac_content = Arc::clone(&pac_content_shared);
 
                 let cancel = runtime.cancel.clone();
@@ -117,23 +131,19 @@ impl ProxyPacServer {
             runtime.tasks.wait().await;
         });
         Ok(ProxyPacServer {
-            config,
             runtime: server_runtime,
             join_handle: Some(handle),
         })
     }
 
-    pub async fn shutdown(&mut self) {
+    pub async fn shutdown(&mut self) -> Result<(), PacServerError> {
         self.runtime.cancel.cancel();
         if let Some(handle) = self.join_handle.take()
             && let Err(err) = handle.await
         {
-            error!(%err, "PAC listener task failed during shutdown");
+            return Err(err.into());
         }
-        info!(
-            "Proxy server {}:{} shutdown successfully.",
-            self.config.host, self.config.port
-        )
+        Ok(())
     }
 
     pub fn proxy_status(&self) -> ExecutionStatus {

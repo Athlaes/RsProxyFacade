@@ -6,12 +6,12 @@
             <div class="app-form-row">
                 <mat-form-field class="full-length">
                     <mat-label>Host</mat-label>
-                    <input type="text" matInput [formControl]="createProxyForm.controls['host']" />
+                    <input type="text" matInput [formControl]="createProxyForm.controls.host" />
                     <mat-error> </mat-error>
                 </mat-form-field>
                 <mat-form-field class="full-length port">
                     <mat-label>Port</mat-label>
-                    <input type="number" matInput [formControl]="createProxyForm.controls['port']" />
+                    <input type="number" matInput [formControl]="createProxyForm.controls.port" />
                 </mat-form-field>
             </div>
         </app-panel-section>
@@ -31,33 +31,22 @@
                             <div class="app-form-row">
                                 <mat-form-field class="full-length">
                                     <mat-label>Host</mat-label>
-                                    <input type="text" matInput [formControl]="createProxyForm.controls['proxyHost']" />
+                                    <input type="text" matInput [formControl]="createProxyForm.controls.proxyHost" />
                                 </mat-form-field>
                                 <mat-form-field class="full-length port">
                                     <mat-label>Port</mat-label>
-                                    <input
-                                        type="number"
-                                        matInput
-                                        [formControl]="createProxyForm.controls['proxyPort']"
-                                    />
+                                    <input type="number" matInput [formControl]="createProxyForm.controls.proxyPort" />
                                 </mat-form-field>
                             </div>
                             <div class="app-form-row">
                                 <mat-form-field class="full-length">
-                                    <mat-label>Username</mat-label>
-                                    <input
+                                    <mat-label>Bypass</mat-label>
+                                    <textarea
                                         type="text"
                                         matInput
-                                        [formControl]="createProxyForm.controls['proxyUsername']"
-                                    />
-                                </mat-form-field>
-                                <mat-form-field class="full-length">
-                                    <mat-label>Password</mat-label>
-                                    <input
-                                        type="password"
-                                        matInput
-                                        [formControl]="createProxyForm.controls['proxyPassword']"
-                                    />
+                                        [formControl]="createProxyForm.controls.proxyBypass"
+                                        rows="1"
+                                    ></textarea>
                                 </mat-form-field>
                             </div>
                         </mat-tab>
@@ -67,16 +56,12 @@
                             <div class="app-form-row">
                                 <mat-form-field class="full-length">
                                     <mat-label>PAC url</mat-label>
-                                    <input
-                                        type="text"
-                                        matInput
-                                        [formControl]="createProxyForm.controls['proxyPacUrl']"
-                                    />
+                                    <input type="text" matInput [formControl]="createProxyForm.controls.proxyPacUrl" />
                                     <mat-hint>URL can be 'https://', 'http://', or "file://"</mat-hint>
                                 </mat-form-field>
                             </div>
                             <div class="app-form-row">
-                                <mat-slide-toggle [formControl]="createProxyForm.controls['useExposedPacServer']"
+                                <mat-slide-toggle [formControl]="createProxyForm.controls.useExposedPacServer"
                                     >Use exposed proxy pac server</mat-slide-toggle
                                 >
                             </div>

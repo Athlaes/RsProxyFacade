@@ -767,6 +767,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "display-error-chain"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bc2146e86bc19f52f4c064a64782f05f139ca464ed72937301631e73f8d6cf5"
+
+[[package]]
 name = "displaydoc"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2935,12 +2941,17 @@ name = "rs-proxy-facade"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "core-foundation 0.9.4",
+ "display-error-chain",
+ "gio",
  "http",
  "http-body-util",
  "hyper",
  "hyper-util",
+ "ipnet",
  "serde",
  "serde_json",
+ "system-configuration",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
@@ -2949,6 +2960,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "windows",
 ]
 
 [[package]]

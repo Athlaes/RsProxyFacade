@@ -27,8 +27,7 @@ type CreateProxyForm = {
   proxyMode: FormControl<ProxyModeOptions>;
   proxyHost: FormControl<string>;
   proxyPort: FormControl<number>;
-  proxyUsername: FormControl<string>;
-  proxyPassword: FormControl<string>;
+  proxyBypass: FormControl<string>;
   proxyPacUrl: FormControl<string>;
   useExposedPacServer: FormControl<boolean>;
 };
@@ -82,15 +81,11 @@ export class ProxyServerComponent {
       nonNullable: true,
       validators: [Validators.max(65535), Validators.min(1), integerValidator],
     }),
+    proxyBypass: new FormControl(localStorage.getItem("server_form_proxy_bypass") ?? "", {
+      nonNullable: true,
+      validators: [],
+    }),
     proxyPacUrl: new FormControl(localStorage.getItem("server_form_proxy_pac_url") ?? "", {
-      nonNullable: true,
-      validators: [],
-    }),
-    proxyUsername: new FormControl(localStorage.getItem("server_form_proxy_username") ?? "", {
-      nonNullable: true,
-      validators: [],
-    }),
-    proxyPassword: new FormControl(localStorage.getItem("server_form_proxy_password") ?? "", {
       nonNullable: true,
       validators: [],
     }),
@@ -108,12 +103,13 @@ export class ProxyServerComponent {
       let storedPacHost = localStorage.getItem("server_pac_form_host");
       let storedPacPort = localStorage.getItem("server_pac_form_port");
       if (!storedPacHost || !storedPacPort) {
-        this.snackService.open("Pac server not configured", "Close", {
-          panelClass: ["app-snackbar", "error"],
-          duration: 4000,
-        });
-        this.createProxyForm.controls.useExposedPacServer.setValue(false);
-        return;
+        if (this.syncExposedPacUrl() === "failed") {
+          this.snackService.open("Pac server not configured", "Close", {
+            panelClass: ["app-snackbar", "error"],
+            duration: 4000,
+          });
+          return;
+        }
       }
       this.createProxyForm.controls.proxyPacUrl.disable();
       const pacUrl = `http://${storedPacHost}:${storedPacPort}/proxy.pac`;
@@ -138,11 +134,27 @@ export class ProxyServerComponent {
     localStorage.setItem("server_form_port", (proxyForm?.port ?? 3128).toString());
     localStorage.setItem("server_form_proxy_host", proxyForm?.proxyHost ?? "");
     localStorage.setItem("server_form_proxy_port", (proxyForm?.proxyPort ?? "1").toString());
-    localStorage.setItem("server_form_proxy_username", proxyForm?.proxyUsername ?? "");
-    localStorage.setItem("server_form_proxy_password", proxyForm?.proxyPassword ?? "");
+    localStorage.setItem("server_form_proxy_bypass", (proxyForm?.proxyBypass ?? "").toString());
     localStorage.setItem("server_form_proxy_pac_url", proxyForm?.proxyPacUrl ?? "");
     localStorage.setItem("server_form_proxy_use_exposed_pac_server", String(proxyForm?.useExposedPacServer ?? false));
   });
+
+  private syncExposedPacUrl(): "worked" | "failed" {
+    let storedPacHost = localStorage.getItem("server_pac_form_host");
+    let storedPacPort = localStorage.getItem("server_pac_form_port");
+    if (!storedPacHost || !storedPacPort) {
+      this.snackService.open("Pac server not configured", "Close", {
+        panelClass: ["app-snackbar", "error"],
+        duration: 4000,
+      });
+      this.createProxyForm.controls.useExposedPacServer.setValue(false);
+      return "failed";
+    }
+    this.createProxyForm.controls.proxyPacUrl.disable();
+    const pacUrl = `http://${storedPacHost}:${storedPacPort}/proxy.pac`;
+    this.createProxyForm.controls.proxyPacUrl.setValue(pacUrl);
+    return "worked";
+  }
 
   updateStatus(status: BadgeStatus) {
     switch (status) {
@@ -182,6 +194,9 @@ export class ProxyServerComponent {
 
   startProxyServer() {
     this.createProxyForm.markAllAsTouched();
+    if (this.syncExposedPacUrl() === "failed") {
+      return;
+    }
     if (!this.createProxyForm.valid) {
       this.snackService.open("Invalid form, fix to continue", "Close", {
         panelClass: ["app-snackbar", "fail"],
@@ -232,8 +247,7 @@ export class ProxyServerComponent {
           manual: {
             host: createProxyForm.controls.proxyHost.getRawValue(),
             port: createProxyForm.controls.proxyPort.getRawValue(),
-            username: createProxyForm.controls.proxyUsername.getRawValue(),
-            password: createProxyForm.controls.proxyPassword.getRawValue(),
+            bypass: createProxyForm.controls.proxyBypass.getRawValue(),
           },
         };
       case "Pac":
