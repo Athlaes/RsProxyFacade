@@ -6,12 +6,14 @@ use http_body_util::{BodyExt, Empty, Limited};
 use hyper::body::Bytes;
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::{client::legacy::Client, rt::TokioExecutor};
+use proxy_watch::pac::PacScript;
 use serde::Serialize;
 use thiserror::Error;
 use tokio::{
     fs::File,
     io::{self, AsyncReadExt},
 };
+use tracing::debug;
 
 #[derive(Error, Debug, Serialize)]
 pub enum LoaderError {
@@ -27,7 +29,7 @@ pub enum LoaderError {
 }
 
 #[async_trait]
-pub trait Loader: Send + Sync {
+trait Loader: Send + Sync {
     async fn load(&self, path: &str) -> Result<String, LoaderError>;
 }
 
@@ -92,7 +94,7 @@ impl Loader for HttpLoader {
     }
 }
 
-pub fn get_loader(path: &str) -> Result<Box<dyn Loader>, LoaderError> {
+fn get_loader(path: &str) -> Result<Box<dyn Loader>, LoaderError> {
     let path = path.split_once("://");
     let Some((left, _)) = path else {
         return Err(LoaderError::LoadingMethodSelection {
@@ -106,4 +108,15 @@ pub fn get_loader(path: &str) -> Result<Box<dyn Loader>, LoaderError> {
             selector: left.to_string(),
         }),
     }
+}
+
+pub async fn load_str(path: &str) -> Result<String, LoaderError> {
+    let loader = get_loader(path)?;
+    debug!("Loading PAC script");
+    loader.load(path).await
+}
+
+pub async fn load_script(path: &str) -> Result<PacScript, LoaderError> {
+    let pac_str = load_str(path).await?;
+    Ok(PacScript::new(pac_str))
 }

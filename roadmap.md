@@ -12,10 +12,10 @@
 - [ ] Fiabiliser le fonctionnement du proxy en mode PAC (sans authentification)
 - [ ] Ajouter un testeur de flux
 - [ ] Ajouter une liste d'exclusion en mode MANUEL
-- [ ] Améliorer les logs du proxy et fournir un logfile
 - [ ] Faire fonctionner les settings prévus
 - [ ] Mettre en place le ci/cd avec signature du binaire + release github
 - [ ] Mettre en place cd pour la release winget
+- [ ] Séparer requête / réponse et domaine
+- [ ] Améliorer les logs du proxy et produire un logfile
 - [ ] Ajouter des TU / TI
 - [ ] Fiabiliser l'authentification (Basic, NTLM, Windows Session, etc.), permettre à l'utilisateur de saisir username et password dans l'UI, lorsque la méthode d'authentification du serveur le permet, ce couple username / password sera utilisé, si une erreur d'authentification ou si la méthode d'authentification ne permet pas d'authentifier l'utilisateur avec un couple user/password, l'utilisateur sera invité à saisir les informations manquantes une seule et unique nouvelle fois avant de provoquer l'échec définitif de processus.
-- [ ] Permettre la sélection

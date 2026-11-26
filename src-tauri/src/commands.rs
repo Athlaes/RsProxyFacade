@@ -12,23 +12,23 @@ use crate::{AppState, proxy::server::ProxyServer};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ProxyPacServerConfig {
+pub struct PacServerCommand {
     pub host: String,
     pub port: u16,
     pub pac_url: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ProxyConfig {
+pub struct ProxyServerCommand {
     pub host: String,
     pub port: u16,
-    pub proxy_mode: ProxyMode,
+    pub proxy_mode: ProxyModeCommand,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum ProxyMode {
+pub enum ProxyModeCommand {
     Direct,
     System,
     Manual { host: String, port: u16, bypass: String },
@@ -46,7 +46,7 @@ pub enum CommandError {
 #[tauri::command]
 pub async fn start_proxy_server(
     state: State<'_, Mutex<AppState>>,
-    config: ProxyConfig,
+    config: ProxyServerCommand,
 ) -> Result<String, CommandError> {
     // Serialize start/stop, and release the old port before binding the new one.
     let mut state = state.lock().await;
@@ -96,7 +96,7 @@ pub async fn proxy_server_status(state: State<'_, Mutex<AppState>>) -> Result<Ex
 #[tauri::command]
 pub async fn start_proxy_pac_server(
     state: State<'_, Mutex<AppState>>,
-    config: ProxyPacServerConfig,
+    config: PacServerCommand,
 ) -> Result<String, CommandError> {
     let mut state = state.lock().await;
     if let Some(mut server) = state.proxy_pac_server.take() {

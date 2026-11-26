@@ -23,7 +23,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     ExecutionStatus,
-    commands::ProxyPacServerConfig,
+    commands::PacServerCommand,
     pac_loader::{self, LoaderError},
 };
 
@@ -65,11 +65,9 @@ impl Drop for ProxyPacServer {
 }
 
 impl ProxyPacServer {
-    pub async fn new(config: ProxyPacServerConfig) -> Result<ProxyPacServer, PacServerError> {
+    pub async fn new(config: PacServerCommand) -> Result<ProxyPacServer, PacServerError> {
         let config = Arc::new(config);
-        let loader = pac_loader::get_loader(&config.pac_url)?;
-        debug!("Loading PAC script");
-        let pac_content = loader.load(&config.pac_url).await?;
+        let pac_content = pac_loader::load_str(&config.pac_url).await?;
         debug!(bytes = pac_content.len(), "PAC script loaded");
 
         let pac_content_shared = Arc::new(pac_content);
@@ -160,7 +158,7 @@ impl ProxyPacServer {
 
     async fn serve_pac(
         request: Request<Incoming>,
-        _: Arc<ProxyPacServerConfig>,
+        _: Arc<PacServerCommand>,
         pac_content: Arc<String>,
     ) -> Result<Response<Full<Bytes>>, Infallible> {
         let mut response = Response::new(Full::new(Bytes::new()));

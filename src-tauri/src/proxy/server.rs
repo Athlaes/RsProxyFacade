@@ -1,11 +1,15 @@
 use std::{future::Future, net::SocketAddr, sync::Arc, time::Duration};
 
-use crate::proxy::target_resolver::ResolvedDestination;
-use crate::{ExecutionStatus, commands::ProxyConfig, proxy::target_resolver};
+use crate::commands::ProxyModeCommand;
+use crate::pac_loader;
+use crate::proxy::system_proxy::{SystemProxyManager, SystemProxyMode, SystemProxyReader};
+use crate::proxy::target_resolver::{self, ResolvedDestination};
+use crate::{ExecutionStatus, commands::ProxyServerCommand};
 use display_error_chain::ErrorChainExt;
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{Method, Request, Response, body::Bytes, client, server, service::service_fn, upgrade::Upgraded};
 use hyper_util::rt::TokioIo;
+use proxy_watch::pac::PacScript;
 use serde::Serialize;
 use tokio::{
     io,
@@ -20,6 +24,10 @@ const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(thiserror::Error, Debug, Serialize)]
 pub enum ProxyServerError {
+    #[error(transparent)]
+    SystemSettings(#[from] super::system_proxy::SystemProxyError),
+    #[error(transparent)]
+    PacLoad(#[from] crate::pac_loader::LoaderError),
     #[error("Couldn't start proxy server on {host}:{port}")]
     Binding {
         host: String,
@@ -37,13 +45,36 @@ pub enum ProxyServerError {
 }
 
 pub struct ProxyServer {
-    config: Arc<ProxyConfig>,
+    config: Arc<ProxyServerConfig>,
     runtime: Arc<ProxyRuntime>,
     join_handle: Option<JoinHandle<()>>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyServerConfig {
+    pub host: String,
+    pub port: u16,
+    pub proxy_mode: ProxyMode,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProxyMode {
+    Direct,
+    Manual {
+        host: String,
+        port: u16,
+        bypass: String,
+    },
+    Pac {
+        url: String,
+        #[serde(skip_serializing)]
+        pac_file: PacScript,
+    },
+}
+
 // Shared by the listener, HTTP connections and CONNECT tunnels.
-#[derive(Clone)]
 struct ProxyRuntime {
     listener: SocketAddr,
     cancel: CancellationToken,
@@ -69,9 +100,45 @@ impl Drop for ProxyServer {
     }
 }
 
+impl ProxyMode {
+    async fn from_command(proxy_mode_command: ProxyModeCommand) -> Result<Self, ProxyServerError> {
+        Ok(match proxy_mode_command {
+            ProxyModeCommand::Direct => ProxyMode::Direct,
+            ProxyModeCommand::Manual { host, port, bypass } => ProxyMode::Manual { host, port, bypass },
+            ProxyModeCommand::System => ProxyMode::from_system(SystemProxyManager::read_system_proxy()?).await?,
+            ProxyModeCommand::Pac { url } => ProxyMode::Pac {
+                url: url.clone(),
+                pac_file: pac_loader::load_script(&url).await?,
+            },
+        })
+    }
+
+    async fn from_system(proxy_mode_system: SystemProxyMode) -> Result<Self, ProxyServerError> {
+        Ok(match proxy_mode_system {
+            SystemProxyMode::Direct => ProxyMode::Direct,
+            SystemProxyMode::Pac { url } => ProxyMode::Pac {
+                url: url.clone(),
+                pac_file: pac_loader::load_script(&url).await?,
+            },
+            SystemProxyMode::Manual { host, port, bypass } => ProxyMode::Manual { host, port, bypass },
+        })
+    }
+}
+
+impl ProxyServerConfig {
+    async fn new(command: ProxyServerCommand) -> Result<Self, ProxyServerError> {
+        Ok(Self {
+            host: command.host,
+            port: command.port,
+            proxy_mode: ProxyMode::from_command(command.proxy_mode).await?,
+        })
+    }
+}
+
 impl ProxyServer {
-    pub async fn new(mut config: ProxyConfig) -> Result<Self, ProxyServerError> {
-        info!("Starting proxy server on http://{}:{}", &config.host, &config.port);
+    pub async fn new(command: ProxyServerCommand) -> Result<Self, ProxyServerError> {
+        info!("Starting proxy server on http://{}:{}", &command.host, &command.port);
+        let mut config = ProxyServerConfig::new(command).await?;
         let listener = TcpListener::bind((config.host.clone(), config.port))
             .await
             .map_err(|err| ProxyServerError::Binding {
@@ -150,10 +217,7 @@ impl ProxyServer {
         {
             return Err(ProxyServerError::from(err));
         }
-        info!(
-            "Proxy server {}:{} shutdown successfully.",
-            self.config.host, self.config.port
-        );
+        info!(listener = %self.runtime.listener, "Proxy server stopped");
         Ok(())
     }
 
@@ -167,13 +231,16 @@ impl ProxyServer {
 
     async fn proxy_req(
         mut req: Request<hyper::body::Incoming>,
-        config: Arc<ProxyConfig>,
+        config: Arc<ProxyServerConfig>,
         runtime: Arc<ProxyRuntime>,
     ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
         req.headers_mut().remove(http::header::PROXY_AUTHORIZATION);
-        let route = match target_resolver::resolve_destination(&req, &config) {
-            Ok(route) => route,
-            Err(_) => return Ok(Self::error_response(http::StatusCode::BAD_GATEWAY)),
+        let routes = match target_resolver::resolve_destination(&req, &config).await {
+            Ok(routes) => routes,
+            Err(_) => {
+                warn!("Failed to resolve proxy routes");
+                return Ok(Self::error_response(http::StatusCode::BAD_GATEWAY));
+            }
         };
         let connect = req.method() == Method::CONNECT;
         let Some(authority) = req.uri().authority().cloned() else {
@@ -187,26 +254,11 @@ impl ProxyServer {
         }
         let destination_host = authority.host().trim_start_matches('[').trim_end_matches(']');
         let destination_port = authority.port_u16().unwrap_or(80);
-        let (peer_host, peer_port, route_kind) = match &route {
-            ResolvedDestination::Direct => (destination_host, destination_port, "direct"),
-            ResolvedDestination::HttpProxy { host, port } => {
-                (host.trim_start_matches('[').trim_end_matches(']'), *port, "http_proxy")
-            }
-        };
-        debug!(
-            method = %req.method(), route = route_kind, destination_host, destination_port,
-            "Connecting to resolved route"
-        );
-        let stream = match timeout(
-            UPSTREAM_TIMEOUT,
-            Self::connect_destination((peer_host, peer_port), runtime.listener),
-        )
-        .await
-        {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(status)) => return Ok(Self::error_response(status)),
-            Err(_) => return Ok(Self::error_response(http::StatusCode::GATEWAY_TIMEOUT)),
-        };
+        let (route, stream) =
+            match Self::connect_routes(routes, destination_host, destination_port, runtime.listener).await {
+                Ok(selected) => selected,
+                Err(status) => return Ok(Self::error_response(status)),
+            };
 
         if connect {
             match &route {
@@ -365,6 +417,46 @@ impl ProxyServer {
         ] {
             headers.remove(name);
         }
+    }
+
+    async fn connect_routes(
+        routes: Vec<ResolvedDestination>,
+        destination_host: &str,
+        destination_port: u16,
+        listener: SocketAddr,
+    ) -> Result<(ResolvedDestination, TcpStream), http::StatusCode> {
+        let count = routes.len();
+        let deadline = tokio::time::Instant::now() + UPSTREAM_TIMEOUT;
+        let mut last_status = http::StatusCode::BAD_GATEWAY;
+        for (index, route) in routes.into_iter().enumerate() {
+            let (host, port, kind) = match &route {
+                ResolvedDestination::Direct => (destination_host, destination_port, "direct"),
+                ResolvedDestination::HttpProxy { host, port } => {
+                    (host.trim_start_matches('[').trim_end_matches(']'), *port, "http_proxy")
+                }
+            };
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                last_status = http::StatusCode::GATEWAY_TIMEOUT;
+                break;
+            }
+            // Reserve time for later candidates if this one stalls.
+            let budget = remaining / u32::try_from(count - index).unwrap_or(u32::MAX);
+            let attempt = index + 1;
+            debug!(attempt, count, route = kind, port, "Trying route candidate");
+            match timeout(budget, Self::connect_destination((host, port), listener)).await {
+                Ok(Ok(stream)) => {
+                    debug!(attempt, route = kind, peer = ?stream.peer_addr().ok(), "Route connected");
+                    return Ok((route, stream));
+                }
+                Ok(Err(http::StatusCode::FORBIDDEN)) => return Err(http::StatusCode::FORBIDDEN),
+                Ok(Err(status)) => last_status = status,
+                Err(_) => last_status = http::StatusCode::GATEWAY_TIMEOUT,
+            }
+            debug!(attempt, count, status = %last_status, "Route candidate failed");
+        }
+        warn!(count, status = %last_status, "No route connected");
+        Err(last_status)
     }
 
     async fn connect_destination(

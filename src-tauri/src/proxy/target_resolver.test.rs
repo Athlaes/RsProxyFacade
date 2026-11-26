@@ -1,5 +1,23 @@
 use super::*;
 
+#[tokio::test]
+async fn loaded_pac_survives_removal_of_its_source() {
+    let path = std::env::temp_dir().join(format!("rs-proxy-lifetime-{}.pac", std::process::id()));
+    let url = format!("file://{}", path.display());
+    std::fs::write(&path, "function FindProxyForURL(url, host) { return 'DIRECT'; }").unwrap();
+    let routing = SystemProxy::new(ProxyModeCommand::Pac { url: url.clone() }).await.unwrap();
+    std::fs::remove_file(path).unwrap();
+    let SystemProxy::Pac(script) = routing else {
+        panic!("Expected PAC settings")
+    };
+    let uri = "http://example.org/".parse().unwrap();
+    for _ in 0..2 {
+        let routes = resolve_pac(&script, &uri, &Method::GET).await.unwrap();
+        assert!(matches!(routes.as_slice(), [ResolvedDestination::Direct]));
+    }
+    assert!(SystemProxy::new(ProxyModeCommand::Pac { url }).await.is_err());
+}
+
 #[test]
 fn matches_hosts_and_globs_without_crossing_domain_boundaries() {
     for (host, rules, expected) in [

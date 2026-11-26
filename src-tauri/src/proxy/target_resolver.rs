@@ -1,24 +1,40 @@
-use http::{Request, Uri};
+use http::{Method, Request, Uri};
 use hyper::body::Incoming;
 use ipnet::IpNet;
+use proxy_watch::{
+    ProxyStep,
+    pac::{self, PacPolicy, PacScript},
+};
 use std::net::IpAddr;
 use thiserror::Error;
 
-use crate::{
-    commands::{ProxyConfig, ProxyMode},
-    proxy::system_proxy::{self, SystemProxyError},
+use crate::proxy::{
+    server::{ProxyMode, ProxyServerConfig},
+    system_proxy::{self, SystemProxyError},
 };
 
 #[derive(Error, Debug)]
 pub enum TargetResolveError {
+    #[error("Unable to resolve system proxy settings")]
+    SystemProxySettingsResolution(#[from] SystemProxyError),
     #[error("Invalid or unsupported proxy bypass rule: {rule}")]
     InvalidBypassRule { rule: String },
-    #[error("System proxy settings couldn't be resolved")]
-    SystemProxyConfig(#[from] SystemProxyError),
     #[error("Invalid proxy settings {host}:{port}")]
     InvalidServerProxy { host: String, port: u16 },
     #[error("Authority not found in {uri}")]
     MissingAuthority { uri: String },
+    #[error("Missing PAC file data")]
+    MissingPacFile,
+    #[error("Invalid request destination for PAC evaluation")]
+    InvalidPacDestination,
+    #[error("PAC returned an invalid HTTP proxy")]
+    InvalidPacProxy,
+    #[error("PAC returned a proxy protocol unsupported by this transport")]
+    UnsupportedPacProxy,
+    #[error("PAC evaluation failed")]
+    PacEvaluation(#[from] proxy_watch::Error),
+    #[error("PAC evaluation task failed")]
+    PacTask(#[from] tokio::task::JoinError),
 }
 
 pub enum ResolvedDestination {
@@ -26,24 +42,14 @@ pub enum ResolvedDestination {
     HttpProxy { host: String, port: u16 },
 }
 
-pub fn resolve_destination(
+pub async fn resolve_destination(
     req: &Request<Incoming>,
-    config: &ProxyConfig,
+    config: &ProxyServerConfig,
 ) -> Result<Vec<ResolvedDestination>, TargetResolveError> {
     match &config.proxy_mode {
         ProxyMode::Direct => resolve_direct(req.uri()),
-        ProxyMode::System => {
-            let sys_proxy = system_proxy::SystemProxy::new()?;
-            match &sys_proxy {
-                system_proxy::SystemProxy::Direct => resolve_direct(req.uri()),
-                system_proxy::SystemProxy::Pac { url } => resolve_pac_url(&url),
-                system_proxy::SystemProxy::Manual { host, port, bypass } => {
-                    resolve_manual(req.uri(), host, port, bypass)
-                }
-            }
-        }
         ProxyMode::Manual { host, port, bypass } => resolve_manual(req.uri(), host, port, bypass),
-        ProxyMode::Pac { url } => resolve_pac_url(url),
+        ProxyMode::Pac { pac_file, .. } => resolve_pac(&pac_file, req.uri(), req.method()).await,
     }
 }
 
@@ -157,8 +163,59 @@ fn wildcard_matches(host: &str, pattern: &str) -> bool {
     pattern[p..].iter().all(|byte| *byte == b'*')
 }
 
-fn resolve_pac_url(_: &str) -> Result<Vec<ResolvedDestination>, TargetResolveError> {
-    todo!()
+async fn resolve_pac(
+    pac_content: &PacScript,
+    uri: &Uri,
+    method: &Method,
+) -> Result<Vec<ResolvedDestination>, TargetResolveError> {
+    let authority = uri.authority().ok_or(TargetResolveError::InvalidPacDestination)?;
+
+    if authority.as_str().contains('@') {
+        return Err(TargetResolveError::InvalidPacDestination);
+    }
+
+    // CONNECT fournit une autorité, par exemple "intranet.example:443".
+    let destination = if method == Method::CONNECT {
+        if authority.port_u16().is_none() {
+            return Err(TargetResolveError::InvalidPacDestination);
+        }
+        format!("https://{authority}/")
+    } else {
+        if uri.scheme_str() != Some("http") {
+            return Err(TargetResolveError::InvalidPacDestination);
+        }
+        uri.to_string()
+    };
+
+    let url = proxy_watch::Url::parse(&destination).map_err(|_| TargetResolveError::InvalidPacDestination)?;
+
+    // L'évaluation JavaScript est synchrone. Libérer le worker Tokio
+    // pendant son exécution permet aux autres connexions de progresser.
+    let script = pac_content.clone();
+    let steps = tokio::task::spawn_blocking(move || pac::evaluate(&script, &url, &PacPolicy::new())).await??;
+
+    steps
+        .into_iter()
+        .map(|step| match step {
+            ProxyStep::Direct => Ok(ResolvedDestination::Direct),
+            ProxyStep::Http(endpoint) => {
+                let authority = endpoint
+                    .authority()
+                    .parse::<http::uri::Authority>()
+                    .map_err(|_| TargetResolveError::InvalidPacProxy)?;
+                let port = authority
+                    .port_u16()
+                    .filter(|port| *port != 0)
+                    .ok_or(TargetResolveError::InvalidPacProxy)?;
+
+                Ok(ResolvedDestination::HttpProxy {
+                    host: authority.host().to_owned(),
+                    port,
+                })
+            }
+            _ => Err(TargetResolveError::UnsupportedPacProxy),
+        })
+        .collect()
 }
 
 #[cfg(test)]
