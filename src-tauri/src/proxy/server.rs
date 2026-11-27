@@ -1,4 +1,4 @@
-use std::{future::Future, net::SocketAddr, sync::Arc, time::Duration};
+use std::{future::Future, net::SocketAddr, sync::Arc};
 
 use crate::commands::ProxyModeCommand;
 use crate::pac_loader;
@@ -15,12 +15,9 @@ use tokio::{
     io,
     net::{TcpListener, TcpStream, ToSocketAddrs, lookup_host},
     task::{JoinError, JoinHandle},
-    time::timeout,
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, error, info, warn};
-
-const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(thiserror::Error, Debug, Serialize)]
 pub enum ProxyServerError {
@@ -45,12 +42,12 @@ pub enum ProxyServerError {
 }
 
 pub struct ProxyServer {
-    config: Arc<ProxyServerConfig>,
+    pub config: Arc<ProxyServerConfig>,
     runtime: Arc<ProxyRuntime>,
     join_handle: Option<JoinHandle<()>>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyServerConfig {
     pub host: String,
@@ -58,7 +55,7 @@ pub struct ProxyServerConfig {
     pub proxy_mode: ProxyMode,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub enum ProxyMode {
     Direct,
@@ -264,15 +261,9 @@ impl ProxyServer {
             match &route {
                 ResolvedDestination::Direct => Self::spawn_tunnel(req, stream, &runtime),
                 ResolvedDestination::HttpProxy { .. } => {
-                    let tunnel = timeout(
-                        UPSTREAM_TIMEOUT,
-                        Self::connect_upstream(stream, authority.as_str(), &runtime),
-                    )
-                    .await;
-                    match tunnel {
-                        Ok(Ok(upgraded)) => Self::spawn_tunnel(req, TokioIo::new(upgraded), &runtime),
-                        Ok(Err(status)) => return Ok(Self::error_response(status)),
-                        Err(_) => return Ok(Self::error_response(http::StatusCode::GATEWAY_TIMEOUT)),
+                    match Self::connect_upstream(stream, authority.as_str(), &runtime).await {
+                        Ok(upgraded) => Self::spawn_tunnel(req, TokioIo::new(upgraded), &runtime),
+                        Err(status) => return Ok(Self::error_response(status)),
                     }
                 }
             }
@@ -310,10 +301,9 @@ impl ProxyServer {
                 result = conn => if let Err(err) = result { warn!(%err, "HTTP connection failed"); },
             }
         });
-        let mut response = match timeout(UPSTREAM_TIMEOUT, sender.send_request(req)).await {
-            Ok(Ok(response)) => response,
-            Ok(Err(err)) => return Ok(Self::upstream_error_response(err)),
-            Err(_) => return Ok(Self::error_response(http::StatusCode::GATEWAY_TIMEOUT)),
+        let mut response = match sender.send_request(req).await {
+            Ok(response) => response,
+            Err(err) => return Ok(Self::upstream_error_response(err)),
         };
         debug!(status = %response.status(), "Received HTTP response from destination route");
         if response.status() == http::StatusCode::PROXY_AUTHENTICATION_REQUIRED {
@@ -426,7 +416,6 @@ impl ProxyServer {
         listener: SocketAddr,
     ) -> Result<(ResolvedDestination, TcpStream), http::StatusCode> {
         let count = routes.len();
-        let deadline = tokio::time::Instant::now() + UPSTREAM_TIMEOUT;
         let mut last_status = http::StatusCode::BAD_GATEWAY;
         for (index, route) in routes.into_iter().enumerate() {
             let (host, port, kind) = match &route {
@@ -435,23 +424,15 @@ impl ProxyServer {
                     (host.trim_start_matches('[').trim_end_matches(']'), *port, "http_proxy")
                 }
             };
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                last_status = http::StatusCode::GATEWAY_TIMEOUT;
-                break;
-            }
-            // Reserve time for later candidates if this one stalls.
-            let budget = remaining / u32::try_from(count - index).unwrap_or(u32::MAX);
             let attempt = index + 1;
             debug!(attempt, count, route = kind, port, "Trying route candidate");
-            match timeout(budget, Self::connect_destination((host, port), listener)).await {
-                Ok(Ok(stream)) => {
+            match Self::connect_destination((host, port), listener).await {
+                Ok(stream) => {
                     debug!(attempt, route = kind, peer = ?stream.peer_addr().ok(), "Route connected");
                     return Ok((route, stream));
                 }
-                Ok(Err(http::StatusCode::FORBIDDEN)) => return Err(http::StatusCode::FORBIDDEN),
-                Ok(Err(status)) => last_status = status,
-                Err(_) => last_status = http::StatusCode::GATEWAY_TIMEOUT,
+                Err(http::StatusCode::FORBIDDEN) => return Err(http::StatusCode::FORBIDDEN),
+                Err(status) => last_status = status,
             }
             debug!(attempt, count, status = %last_status, "Route candidate failed");
         }

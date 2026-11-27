@@ -1,6 +1,8 @@
 use super::*;
 use crate::commands::ProxyModeCommand;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::time::timeout;
 
 #[tokio::test]
 async fn failed_candidate_falls_back_to_the_next_proxy_before_direct() {
@@ -61,6 +63,52 @@ async fn exchange(server: &ProxyServer, request: &str) -> String {
     let mut stream = TcpStream::connect(server.runtime.listener).await.unwrap();
     stream.write_all(request.as_bytes()).await.unwrap();
     headers(&mut stream).await
+}
+
+#[tokio::test]
+async fn pac_skips_unsupported_proxies() {
+    let peer = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = peer.local_addr().unwrap();
+    let path = std::env::temp_dir().join(format!("rs-proxy-pac-order-{}.pac", std::process::id()));
+    let request = "GET http://origin.invalid/page HTTP/1.1\r\nHost: origin.invalid\r\n\r\n";
+    let socks = "SOCKS5 socks.invalid:1080";
+    for routes in [
+        format!("{socks}; PROXY {address}"),
+        format!("PROXY {address}; {socks}"),
+        socks.to_owned(),
+    ] {
+        std::fs::write(
+            &path,
+            format!("function FindProxyForURL(url, host) {{ return '{routes}'; }}"),
+        )
+        .unwrap();
+        let mut server = start(ProxyModeCommand::Pac {
+            url: format!("file://{}", path.display()),
+        })
+        .await;
+        std::fs::remove_file(&path).unwrap();
+        if routes == socks {
+            assert!(exchange(&server, request).await.starts_with("HTTP/1.1 502"));
+            assert!(timeout(Duration::from_millis(50), peer.accept()).await.is_err());
+        } else {
+            let upstream = async {
+                let (mut stream, _) = peer.accept().await.unwrap();
+                assert!(
+                    headers(&mut stream)
+                        .await
+                        .starts_with("GET http://origin.invalid/page HTTP/1.1")
+                );
+                stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await.unwrap();
+            };
+            let (response, ()) = timeout(Duration::from_secs(3), async {
+                tokio::join!(exchange(&server, request), upstream)
+            })
+            .await
+            .unwrap();
+            assert!(response.starts_with("HTTP/1.1 204"));
+        }
+        server.shutdown().await.unwrap();
+    }
 }
 
 #[tokio::test]

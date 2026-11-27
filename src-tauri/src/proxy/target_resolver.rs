@@ -27,8 +27,6 @@ pub enum TargetResolveError {
     InvalidPacDestination,
     #[error("PAC returned an invalid HTTP proxy")]
     InvalidPacProxy,
-    #[error("PAC returned a proxy protocol unsupported by this transport")]
-    UnsupportedPacProxy,
     #[error("PAC evaluation failed")]
     PacEvaluation(#[from] proxy_watch::Error),
     #[error("PAC evaluation task failed")]
@@ -192,10 +190,10 @@ async fn resolve_pac(
     let script = pac_content.clone();
     let steps = tokio::task::spawn_blocking(move || pac::evaluate(&script, &url, &PacPolicy::new())).await??;
 
-    steps
-        .into_iter()
-        .map(|step| match step {
-            ProxyStep::Direct => Ok(ResolvedDestination::Direct),
+    let mut routes = Vec::new();
+    for step in steps {
+        match step {
+            ProxyStep::Direct => routes.push(ResolvedDestination::Direct),
             ProxyStep::Http(endpoint) => {
                 let authority = endpoint
                     .authority()
@@ -206,14 +204,15 @@ async fn resolve_pac(
                     .filter(|port| *port != 0)
                     .ok_or(TargetResolveError::InvalidPacProxy)?;
 
-                Ok(ResolvedDestination::HttpProxy {
+                routes.push(ResolvedDestination::HttpProxy {
                     host: authority.host().to_owned(),
                     port,
                 })
             }
-            _ => Err(TargetResolveError::UnsupportedPacProxy),
-        })
-        .collect()
+            other => tracing::warn!(candidate = ?other, "Skipping unsupported PAC proxy protocol"),
+        }
+    }
+    Ok(routes)
 }
 
 #[cfg(test)]

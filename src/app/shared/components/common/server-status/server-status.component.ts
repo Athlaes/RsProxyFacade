@@ -1,5 +1,6 @@
-import { Component, computed, effect, inject, input, OnInit, output, signal } from "@angular/core";
-import { CommandService } from "../../../services/command.service";
+import { Component, computed, DestroyRef, effect, inject, input, OnInit, output, signal } from "@angular/core";
+import { takeUntilDestroyed } from "@angular/core/rxjs-interop";
+import { catchError, EMPTY, repeat, switchMap, timer } from "rxjs";
 import { MatSnackBar } from "@angular/material/snack-bar";
 import { BadgeComponent, BadgeStatus } from "../../design-system/badge/badge.component";
 
@@ -10,6 +11,7 @@ import { BadgeComponent, BadgeStatus } from "../../design-system/badge/badge.com
   templateUrl: "./server-status.component.html",
 })
 export class ServerStatusComponent implements OnInit {
+  private readonly destroyRef = inject(DestroyRef);
   private readonly snackBarService = inject(MatSnackBar);
   status = signal<BadgeStatus>("fail");
   pollingMethod = input.required<() => Promise<BadgeStatus>>();
@@ -33,21 +35,19 @@ export class ServerStatusComponent implements OnInit {
   });
 
   ngOnInit(): void {
-    this.poll();
-  }
-
-  poll(): void {
-    setInterval(() => {
-      this.pollingMethod()()
-        .then((res) => {
-          this.status.set(res);
-        })
-        .catch((_) => {
+    timer(1000)
+      .pipe(
+        switchMap(() => this.pollingMethod()()),
+        catchError(() => {
           this.snackBarService.open("Couldn't get proxy status", "Close", {
             duration: 4000,
             panelClass: ["app-snackbar", "fail"],
           });
-        });
-    }, 1000);
+          return EMPTY;
+        }),
+        repeat(),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe((status) => this.status.set(status));
   }
 }
