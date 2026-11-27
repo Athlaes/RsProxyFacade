@@ -101,7 +101,7 @@ impl Drop for ProxyServer {
 }
 
 impl ProxyMode {
-    async fn from_command(proxy_mode_command: ProxyModeCommand) -> Result<Self, ProxyServerError> {
+    pub(super) async fn from_command(proxy_mode_command: ProxyModeCommand) -> Result<Self, ProxyServerError> {
         Ok(match proxy_mode_command {
             ProxyModeCommand::Direct => ProxyMode::Direct,
             ProxyModeCommand::Manual { host, port, bypass } => ProxyMode::Manual { host, port, bypass },

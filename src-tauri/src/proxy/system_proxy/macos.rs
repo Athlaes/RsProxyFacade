@@ -7,8 +7,7 @@ use core_foundation::{
 };
 use system_configuration::dynamic_store::SCDynamicStoreBuilder;
 
-use super::SystemProxyError;
-use crate::commands::ProxyMode;
+use super::{SystemProxyError, SystemProxyManager, SystemProxyMode, SystemProxyReader};
 
 type ProxySettings = CFDictionary<CFString, CFType>;
 
@@ -50,10 +49,10 @@ fn endpoint(settings: &ProxySettings, protocol: &str) -> Result<(String, u16), S
     Ok((host.trim().to_owned(), port))
 }
 
-fn read_settings(settings: &ProxySettings) -> Result<ProxyMode, SystemProxyError> {
+fn read_settings(settings: &ProxySettings) -> Result<SystemProxyMode, SystemProxyError> {
     // An explicit PAC takes precedence; ProxyAutoDiscoveryEnable (WPAD) is ignored.
     if enabled(settings, "ProxyAutoConfigEnable")? {
-        return Ok(ProxyMode::Pac {
+        return Ok(SystemProxyMode::Pac {
             url: string(settings, "ProxyAutoConfigURLString")?,
         });
     }
@@ -63,7 +62,7 @@ fn read_settings(settings: &ProxySettings) -> Result<ProxyMode, SystemProxyError
     let http = enabled(settings, "HTTPEnable")?;
     let https = enabled(settings, "HTTPSEnable")?;
     if !http && !https {
-        return Ok(ProxyMode::Direct);
+        return Ok(SystemProxyMode::Direct);
     }
     if !http || !https {
         return Err(error(
@@ -92,15 +91,15 @@ fn read_settings(settings: &ProxySettings) -> Result<ProxyMode, SystemProxyError
     if enabled(settings, "ExcludeSimpleHostnames")? {
         bypass.push("<local>".into());
     }
-    Ok(ProxyMode::Manual {
+    Ok(SystemProxyMode::Manual {
         host,
         port,
         bypass: bypass.join(";"),
     })
 }
 
-impl ProxyMode {
-    pub fn from_system() -> Result<Self, SystemProxyError> {
+impl SystemProxyReader for SystemProxyManager {
+    fn read_system_proxy() -> Result<SystemProxyMode, SystemProxyError> {
         let store = SCDynamicStoreBuilder::new("rs-proxy-facade")
             .build()
             .ok_or_else(|| error("Could not open the macOS system configuration store"))?;
@@ -138,9 +137,9 @@ mod tests {
 
     #[test]
     fn direct_and_wpad_only_do_not_enable_a_proxy() {
-        assert!(matches!(read_settings(&dictionary(&[])).unwrap(), ProxyMode::Direct));
+        assert!(matches!(read_settings(&dictionary(&[])).unwrap(), SystemProxyMode::Direct));
         let settings = dictionary(&[("ProxyAutoDiscoveryEnable", CFNumber::from(1).as_CFType())]);
-        assert!(matches!(read_settings(&settings).unwrap(), ProxyMode::Direct));
+        assert!(matches!(read_settings(&settings).unwrap(), SystemProxyMode::Direct));
     }
 
     #[test]
@@ -153,7 +152,7 @@ mod tests {
             CFString::new("https://config.example/proxy.pac").as_CFType(),
         ));
         assert!(
-            matches!(read_settings(&dictionary(&entries)).unwrap(), ProxyMode::Pac { url } if url == "https://config.example/proxy.pac")
+            matches!(read_settings(&dictionary(&entries)).unwrap(), SystemProxyMode::Pac { url } if url == "https://config.example/proxy.pac")
         );
     }
 
@@ -165,7 +164,7 @@ mod tests {
             "ExceptionsList",
             CFArray::from_CFTypes(&[CFString::new("*.example"), CFString::new("10.0.0.0/8")]).as_CFType(),
         ));
-        let ProxyMode::Manual { host, port, bypass } = read_settings(&dictionary(&entries)).unwrap() else {
+        let SystemProxyMode::Manual { host, port, bypass } = read_settings(&dictionary(&entries)).unwrap() else {
             panic!("Expected manual proxy")
         };
         assert_eq!(host, "proxy.example");

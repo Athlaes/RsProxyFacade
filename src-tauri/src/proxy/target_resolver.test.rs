@@ -1,21 +1,24 @@
 use super::*;
+use crate::commands::ProxyModeCommand;
 
 #[tokio::test]
 async fn loaded_pac_survives_removal_of_its_source() {
     let path = std::env::temp_dir().join(format!("rs-proxy-lifetime-{}.pac", std::process::id()));
     let url = format!("file://{}", path.display());
     std::fs::write(&path, "function FindProxyForURL(url, host) { return 'DIRECT'; }").unwrap();
-    let routing = SystemProxy::new(ProxyModeCommand::Pac { url: url.clone() }).await.unwrap();
+    let routing = ProxyMode::from_command(ProxyModeCommand::Pac { url: url.clone() })
+        .await
+        .unwrap();
     std::fs::remove_file(path).unwrap();
-    let SystemProxy::Pac(script) = routing else {
+    let ProxyMode::Pac { pac_file, .. } = routing else {
         panic!("Expected PAC settings")
     };
     let uri = "http://example.org/".parse().unwrap();
     for _ in 0..2 {
-        let routes = resolve_pac(&script, &uri, &Method::GET).await.unwrap();
+        let routes = resolve_pac(&pac_file, &uri, &Method::GET).await.unwrap();
         assert!(matches!(routes.as_slice(), [ResolvedDestination::Direct]));
     }
-    assert!(SystemProxy::new(ProxyModeCommand::Pac { url }).await.is_err());
+    assert!(ProxyMode::from_command(ProxyModeCommand::Pac { url }).await.is_err());
 }
 
 #[test]

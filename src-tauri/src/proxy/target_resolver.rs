@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::proxy::{
     server::{ProxyMode, ProxyServerConfig},
-    system_proxy::{self, SystemProxyError},
+    system_proxy::SystemProxyError,
 };
 
 #[derive(Error, Debug)]
@@ -23,8 +23,6 @@ pub enum TargetResolveError {
     InvalidServerProxy { host: String, port: u16 },
     #[error("Authority not found in {uri}")]
     MissingAuthority { uri: String },
-    #[error("Missing PAC file data")]
-    MissingPacFile,
     #[error("Invalid request destination for PAC evaluation")]
     InvalidPacDestination,
     #[error("PAC returned an invalid HTTP proxy")]
@@ -49,7 +47,7 @@ pub async fn resolve_destination(
     match &config.proxy_mode {
         ProxyMode::Direct => resolve_direct(req.uri()),
         ProxyMode::Manual { host, port, bypass } => resolve_manual(req.uri(), host, port, bypass),
-        ProxyMode::Pac { pac_file, .. } => resolve_pac(&pac_file, req.uri(), req.method()).await,
+        ProxyMode::Pac { pac_file, .. } => resolve_pac(pac_file, req.uri(), req.method()).await,
     }
 }
 
