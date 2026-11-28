@@ -8,7 +8,7 @@
     "build": "ng build",
     "watch": "ng build --watch --configuration development",
     "tauri": "tauri",
-    "tauri:dev": "set RUST_LOG=DEBUG && tauri dev"
+    "tauri:dev": "set \"RUST_LOG=debug\" && tauri dev"
   },
   "private": true,
   "dependencies": {
