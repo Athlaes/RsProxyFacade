@@ -14,13 +14,25 @@ pub enum SystemProxyError {
     ReadingSystem(
         #[from]
         #[serde(skip_serializing)]
-        Box<dyn std::error::Error>,
+        Box<dyn std::error::Error + Send + Sync>,
     ),
+    #[error(transparent)]
+    SettingSystem(#[serde(skip_serializing)] Box<dyn std::error::Error + Send + Sync>),
 }
 
 #[derive(Serialize)]
-pub enum SystemProxy {
+pub enum SystemProxyMode {
     Direct,
     Pac { url: String },
     Manual { host: String, port: u16, bypass: String },
+}
+
+pub struct SystemProxyManager;
+
+pub trait SystemProxyReader {
+    fn read_system_proxy() -> Result<SystemProxyMode, SystemProxyError>;
+}
+
+pub trait SystemProxySetter {
+    fn set_system_proxy(mode: SystemProxyMode) -> Result<(), SystemProxyError>;
 }

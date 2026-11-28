@@ -7,7 +7,8 @@ use windows::{
     core::PWSTR,
 };
 
-use crate::proxy::system_proxy::{SystemProxy, SystemProxyError};
+use super::SystemProxyError;
+use crate::proxy::system_proxy::{SystemProxyManager, SystemProxyMode, SystemProxyReader};
 
 #[derive(Default)]
 struct NativeConfig(WINHTTP_CURRENT_USER_IE_PROXY_CONFIG);
@@ -62,19 +63,19 @@ fn parse_proxy(value: &str) -> Result<(String, u16), SystemProxyError> {
     Ok((host.to_string(), port))
 }
 
-impl SystemProxy {
-    pub fn new() -> Result<Self, SystemProxyError> {
+impl SystemProxyReader for SystemProxyManager {
+    fn read_system_proxy() -> Result<SystemProxyMode, SystemProxyError> {
         let mut native = NativeConfig::default();
         // The guard keeps allocations alive during conversion and frees them on every exit.
         unsafe {
             WinHttpGetIEProxyConfigForCurrentUser(&mut native.0)
                 .map_err(|error| SystemProxyError::ReadingSystem(Box::new(error)))?;
             if let Some(url) = copy_string(native.0.lpszAutoConfigUrl)? {
-                return Ok(Self::Pac { url });
+                return Ok(SystemProxyMode::Pac { url });
             }
             if let Some(proxy) = copy_string(native.0.lpszProxy)? {
                 let (host, port) = parse_proxy(&proxy)?;
-                return Ok(Self::Manual {
+                return Ok(SystemProxyMode::Manual {
                     host,
                     port,
                     bypass: copy_string(native.0.lpszProxyBypass)?.unwrap_or_default(),
@@ -82,7 +83,7 @@ impl SystemProxy {
             }
         }
         // Automatic discovery (fAutoDetect / WPAD) is deliberately ignored for now.
-        Ok(Self::Direct)
+        Ok(SystemProxyMode::Direct)
     }
 }
 

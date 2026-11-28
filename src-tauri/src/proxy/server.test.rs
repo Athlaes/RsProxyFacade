@@ -1,6 +1,30 @@
 use super::*;
-use crate::commands::ProxyMode;
+use crate::commands::ProxyModeCommand;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::time::timeout;
+
+#[tokio::test]
+async fn failed_candidate_falls_back_to_the_next_proxy_before_direct() {
+    let available = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = available.local_addr().unwrap();
+    let unavailable = tokio::net::TcpSocket::new_v4().unwrap();
+    unavailable.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let proxy = |port| ResolvedDestination::HttpProxy {
+        host: "127.0.0.1".into(),
+        port,
+    };
+    let routes = vec![
+        proxy(unavailable.local_addr().unwrap().port()),
+        proxy(address.port()),
+        ResolvedDestination::Direct,
+    ];
+    let (route, stream) = ProxyServer::connect_routes(routes, "127.0.0.1", 0, "127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    assert!(matches!(route, ResolvedDestination::HttpProxy { port, .. } if port == address.port()));
+    assert_eq!(stream.peer_addr().unwrap(), address);
+}
 
 async fn headers(stream: &mut TcpStream) -> String {
     timeout(Duration::from_secs(3), async {
@@ -17,8 +41,8 @@ async fn headers(stream: &mut TcpStream) -> String {
     .expect("HTTP headers timed out")
 }
 
-async fn start(mode: ProxyMode) -> ProxyServer {
-    ProxyServer::new(ProxyConfig {
+async fn start(mode: ProxyModeCommand) -> ProxyServer {
+    ProxyServer::new(ProxyServerCommand {
         host: "127.0.0.1".into(),
         port: 0,
         proxy_mode: mode,
@@ -27,8 +51,8 @@ async fn start(mode: ProxyMode) -> ProxyServer {
     .unwrap()
 }
 
-fn manual(address: SocketAddr, bypass: &str) -> ProxyMode {
-    ProxyMode::Manual {
+fn manual(address: SocketAddr, bypass: &str) -> ProxyModeCommand {
+    ProxyModeCommand::Manual {
         host: address.ip().to_string(),
         port: address.port(),
         bypass: bypass.into(),
@@ -42,11 +66,62 @@ async fn exchange(server: &ProxyServer, request: &str) -> String {
 }
 
 #[tokio::test]
+async fn pac_skips_unsupported_proxies() {
+    let peer = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = peer.local_addr().unwrap();
+    let path = std::env::temp_dir().join(format!("rs-proxy-pac-order-{}.pac", std::process::id()));
+    let request = "GET http://origin.invalid/page HTTP/1.1\r\nHost: origin.invalid\r\n\r\n";
+    let socks = "SOCKS5 socks.invalid:1080";
+    for routes in [
+        format!("{socks}; PROXY {address}"),
+        format!("PROXY {address}; {socks}"),
+        socks.to_owned(),
+    ] {
+        std::fs::write(
+            &path,
+            format!("function FindProxyForURL(url, host) {{ return '{routes}'; }}"),
+        )
+        .unwrap();
+        let mut server = start(ProxyModeCommand::Pac {
+            url: format!("file://{}", path.display()),
+        })
+        .await;
+        std::fs::remove_file(&path).unwrap();
+        if routes == socks {
+            assert!(exchange(&server, request).await.starts_with("HTTP/1.1 502"));
+            assert!(timeout(Duration::from_millis(50), peer.accept()).await.is_err());
+        } else {
+            let upstream = async {
+                let (mut stream, _) = peer.accept().await.unwrap();
+                assert!(
+                    headers(&mut stream)
+                        .await
+                        .starts_with("GET http://origin.invalid/page HTTP/1.1")
+                );
+                stream.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await.unwrap();
+            };
+            let (response, ()) = timeout(Duration::from_secs(3), async {
+                tokio::join!(exchange(&server, request), upstream)
+            })
+            .await
+            .unwrap();
+            assert!(response.starts_with("HTTP/1.1 204"));
+        }
+        server.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn http_routes_use_correct_target_and_strip_proxy_credentials() {
     for direct in [true, false] {
         let peer = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = peer.local_addr().unwrap();
-        let mut server = start(if direct { ProxyMode::Direct } else { manual(address, "") }).await;
+        let mut server = start(if direct {
+            ProxyModeCommand::Direct
+        } else {
+            manual(address, "")
+        })
+        .await;
         let target = if direct {
             address.to_string()
         } else {
@@ -195,7 +270,7 @@ async fn connect_waits_for_upstream_and_preserves_buffered_bytes() {
 async fn direct_connect_and_failed_upstream() {
     let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = origin.local_addr().unwrap();
-    let mut server = start(ProxyMode::Direct).await;
+    let mut server = start(ProxyModeCommand::Direct).await;
     let fixture = tokio::spawn(async move {
         let (mut stream, _) = origin.accept().await.unwrap();
         stream.write_all(b"hello").await.unwrap();

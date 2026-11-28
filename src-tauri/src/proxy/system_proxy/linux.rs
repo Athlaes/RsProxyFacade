@@ -1,6 +1,6 @@
 use gio::{Settings, SettingsBackend, SettingsSchemaSource, prelude::*};
 
-use super::{SystemProxy, SystemProxyError};
+use super::{SystemProxyError, SystemProxyManager, SystemProxyMode, SystemProxyReader};
 
 fn error(message: impl Into<String>) -> SystemProxyError {
     SystemProxyError::ReadingSystem(message.into().into())
@@ -33,7 +33,7 @@ fn settings(
 fn read_settings(
     source: &SettingsSchemaSource,
     backend: Option<&SettingsBackend>,
-) -> Result<SystemProxy, SystemProxyError> {
+) -> Result<SystemProxyMode, SystemProxyError> {
     let root = settings(
         source,
         backend,
@@ -41,7 +41,7 @@ fn read_settings(
         &["mode", "autoconfig-url", "ignore-hosts"],
     )?;
     match root.string("mode").as_str() {
-        "none" => Ok(SystemProxy::Direct),
+        "none" => Ok(SystemProxyMode::Direct),
         "auto" => {
             let url = root.string("autoconfig-url").trim().to_owned();
             if url.is_empty() {
@@ -49,7 +49,7 @@ fn read_settings(
                     "Automatic proxy configuration has no explicit PAC URL; WPAD is disabled",
                 ));
             }
-            Ok(SystemProxy::Auto { url })
+            Ok(SystemProxyMode::Pac { url })
         }
         "manual" => {
             let mut http_proxy = None;
@@ -75,7 +75,7 @@ fn read_settings(
             }
             // GNOME uses HTTP for HTTPS when the HTTPS entry is unset.
             let Some((host, port)) = http_proxy else {
-                return Ok(SystemProxy::Direct);
+                return Ok(SystemProxyMode::Direct);
             };
             let bypass = root
                 .strv("ignore-hosts")
@@ -83,15 +83,15 @@ fn read_settings(
                 .map(|value| value.as_str())
                 .collect::<Vec<_>>()
                 .join(";");
-            Ok(SystemProxy::Manual { host, port, bypass })
+            Ok(SystemProxyMode::Manual { host, port, bypass })
         }
         _ => Err(error("Unsupported GNOME proxy mode")),
     }
 }
 
-impl SystemProxy {
+impl SystemProxyReader for SystemProxyManager {
     /// Read GNOME/Unity settings. KDE, environment variables and WPAD are not supported.
-    pub fn new() -> Result<Self, SystemProxyError> {
+    fn read_system_proxy() -> Result<SystemProxyMode, SystemProxyError> {
         let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
         if !supported_desktop(&desktop) {
             return Err(error(
@@ -125,13 +125,13 @@ mod tests {
         root.set_string("mode", "none").unwrap();
         assert!(matches!(
             read_settings(&source, Some(&backend)).unwrap(),
-            SystemProxy::Direct
+            SystemProxyMode::Direct
         ));
         root.set_string("mode", "auto").unwrap();
         root.set_string("autoconfig-url", "https://config.example/proxy.pac")
             .unwrap();
         assert!(
-            matches!(read_settings(&source, Some(&backend)).unwrap(), SystemProxy::Auto { url } if url == "https://config.example/proxy.pac")
+            matches!(read_settings(&source, Some(&backend)).unwrap(), SystemProxyMode::Pac { url } if url == "https://config.example/proxy.pac")
         );
         root.set_string("autoconfig-url", "").unwrap();
         assert!(read_settings(&source, Some(&backend)).is_err());
@@ -146,7 +146,7 @@ mod tests {
         .unwrap();
         http.set_string("host", "proxy.example").unwrap();
         http.set_int("port", 8080).unwrap();
-        let SystemProxy::Manual { host, port, bypass } = read_settings(&source, Some(&backend)).unwrap() else {
+        let SystemProxyMode::Manual { host, port, bypass } = read_settings(&source, Some(&backend)).unwrap() else {
             panic!("Expected manual settings")
         };
         assert_eq!(host, "proxy.example");
@@ -165,7 +165,7 @@ mod tests {
         https.set_string("host", "proxy.example").unwrap();
         assert!(matches!(
             read_settings(&source, Some(&backend)).unwrap(),
-            SystemProxy::Manual { .. }
+            SystemProxyMode::Manual { .. }
         ));
         let socks = settings(
             &source,

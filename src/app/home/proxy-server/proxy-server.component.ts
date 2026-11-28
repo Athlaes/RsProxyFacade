@@ -77,7 +77,7 @@ export class ProxyServerComponent {
       nonNullable: true,
       validators: [],
     }),
-    proxyPort: new FormControl(Number(localStorage.getItem("server_form_proxy_port") ?? "0"), {
+    proxyPort: new FormControl(Number(localStorage.getItem("server_form_proxy_port") ?? "1"), {
       nonNullable: true,
       validators: [Validators.max(65535), Validators.min(1), integerValidator],
     }),
@@ -194,7 +194,7 @@ export class ProxyServerComponent {
 
   startProxyServer() {
     this.createProxyForm.markAllAsTouched();
-    if (this.syncExposedPacUrl() === "failed") {
+    if (this.createProxyForm.controls.useExposedPacServer.getRawValue() && this.syncExposedPacUrl() === "failed") {
       return;
     }
     if (!this.createProxyForm.valid) {

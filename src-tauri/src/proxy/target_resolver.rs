@@ -1,24 +1,36 @@
-use http::{Request, Uri};
+use http::{Method, Request, Uri};
 use hyper::body::Incoming;
 use ipnet::IpNet;
+use proxy_watch::{
+    ProxyStep,
+    pac::{self, PacPolicy, PacScript},
+};
 use std::net::IpAddr;
 use thiserror::Error;
 
-use crate::{
-    commands::{ProxyConfig, ProxyMode},
-    proxy::system_proxy::{self, SystemProxyError},
+use crate::proxy::{
+    server::{ProxyMode, ProxyServerConfig},
+    system_proxy::SystemProxyError,
 };
 
 #[derive(Error, Debug)]
 pub enum TargetResolveError {
+    #[error("Unable to resolve system proxy settings")]
+    SystemProxySettingsResolution(#[from] SystemProxyError),
     #[error("Invalid or unsupported proxy bypass rule: {rule}")]
     InvalidBypassRule { rule: String },
-    #[error("System proxy settings couldn't be resolved")]
-    SystemProxyConfig(#[from] SystemProxyError),
     #[error("Invalid proxy settings {host}:{port}")]
     InvalidServerProxy { host: String, port: u16 },
     #[error("Authority not found in {uri}")]
     MissingAuthority { uri: String },
+    #[error("Invalid request destination for PAC evaluation")]
+    InvalidPacDestination,
+    #[error("PAC returned an invalid HTTP proxy")]
+    InvalidPacProxy,
+    #[error("PAC evaluation failed")]
+    PacEvaluation(#[from] proxy_watch::Error),
+    #[error("PAC evaluation task failed")]
+    PacTask(#[from] tokio::task::JoinError),
 }
 
 pub enum ResolvedDestination {
@@ -26,34 +38,29 @@ pub enum ResolvedDestination {
     HttpProxy { host: String, port: u16 },
 }
 
-pub fn resolve_destination(
+pub async fn resolve_destination(
     req: &Request<Incoming>,
-    config: &ProxyConfig,
-) -> Result<ResolvedDestination, TargetResolveError> {
+    config: &ProxyServerConfig,
+) -> Result<Vec<ResolvedDestination>, TargetResolveError> {
     match &config.proxy_mode {
         ProxyMode::Direct => resolve_direct(req.uri()),
-        ProxyMode::System => {
-            let sys_proxy = system_proxy::SystemProxy::new()?;
-            match &sys_proxy {
-                system_proxy::SystemProxy::Direct => resolve_direct(req.uri()),
-                system_proxy::SystemProxy::Pac { url } => resolve_pac_url(&url),
-                system_proxy::SystemProxy::Manual { host, port, bypass } => {
-                    resolve_manual(req.uri(), host, port, bypass)
-                }
-            }
-        }
         ProxyMode::Manual { host, port, bypass } => resolve_manual(req.uri(), host, port, bypass),
-        ProxyMode::Pac { url } => resolve_pac_url(url),
+        ProxyMode::Pac { pac_file, .. } => resolve_pac(pac_file, req.uri(), req.method()).await,
     }
 }
 
-fn resolve_direct(uri: &Uri) -> Result<ResolvedDestination, TargetResolveError> {
+fn resolve_direct(uri: &Uri) -> Result<Vec<ResolvedDestination>, TargetResolveError> {
     uri.authority()
-        .map(|_| ResolvedDestination::Direct)
+        .map(|_| vec![ResolvedDestination::Direct])
         .ok_or(TargetResolveError::MissingAuthority { uri: uri.to_string() })
 }
 
-fn resolve_manual(uri: &Uri, host: &str, port: &u16, bypass: &str) -> Result<ResolvedDestination, TargetResolveError> {
+fn resolve_manual(
+    uri: &Uri,
+    host: &str,
+    port: &u16,
+    bypass: &str,
+) -> Result<Vec<ResolvedDestination>, TargetResolveError> {
     let destination = uri
         .host()
         .ok_or_else(|| TargetResolveError::MissingAuthority { uri: uri.to_string() })?;
@@ -66,13 +73,13 @@ fn resolve_manual(uri: &Uri, host: &str, port: &u16, bypass: &str) -> Result<Res
     }
 
     if matches_bypass(destination, bypass)? {
-        return Ok(ResolvedDestination::Direct);
+        return Ok(vec![ResolvedDestination::Direct]);
     }
 
-    Ok(ResolvedDestination::HttpProxy {
+    Ok(vec![ResolvedDestination::HttpProxy {
         host: host.to_owned(),
         port: port.to_owned(),
-    })
+    }])
 }
 
 /// Match a host (without a port) against semicolon/comma-separated exclusions.
@@ -152,94 +159,62 @@ fn wildcard_matches(host: &str, pattern: &str) -> bool {
     pattern[p..].iter().all(|byte| *byte == b'*')
 }
 
-fn resolve_pac_url(_: &str) -> Result<ResolvedDestination, TargetResolveError> {
-    todo!()
+async fn resolve_pac(
+    pac_content: &PacScript,
+    uri: &Uri,
+    method: &Method,
+) -> Result<Vec<ResolvedDestination>, TargetResolveError> {
+    let authority = uri.authority().ok_or(TargetResolveError::InvalidPacDestination)?;
+
+    if authority.as_str().contains('@') {
+        return Err(TargetResolveError::InvalidPacDestination);
+    }
+
+    // CONNECT fournit une autorité, par exemple "intranet.example:443".
+    let destination = if method == Method::CONNECT {
+        if authority.port_u16().is_none() {
+            return Err(TargetResolveError::InvalidPacDestination);
+        }
+        format!("https://{authority}/")
+    } else {
+        if uri.scheme_str() != Some("http") {
+            return Err(TargetResolveError::InvalidPacDestination);
+        }
+        uri.to_string()
+    };
+
+    let url = proxy_watch::Url::parse(&destination).map_err(|_| TargetResolveError::InvalidPacDestination)?;
+
+    // L'évaluation JavaScript est synchrone. Libérer le worker Tokio
+    // pendant son exécution permet aux autres connexions de progresser.
+    let script = pac_content.clone();
+    let steps = tokio::task::spawn_blocking(move || pac::evaluate(&script, &url, &PacPolicy::new())).await??;
+
+    let mut routes = Vec::new();
+    for step in steps {
+        match step {
+            ProxyStep::Direct => routes.push(ResolvedDestination::Direct),
+            ProxyStep::Http(endpoint) => {
+                let authority = endpoint
+                    .authority()
+                    .parse::<http::uri::Authority>()
+                    .map_err(|_| TargetResolveError::InvalidPacProxy)?;
+                let port = authority
+                    .port_u16()
+                    .filter(|port| *port != 0)
+                    .ok_or(TargetResolveError::InvalidPacProxy)?;
+
+                routes.push(ResolvedDestination::HttpProxy {
+                    host: authority.host().to_owned(),
+                    port,
+                })
+            }
+            other => tracing::warn!(candidate = ?other, "Skipping unsupported PAC proxy protocol"),
+        }
+    }
+    Ok(routes)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn matches_hosts_and_globs_without_crossing_domain_boundaries() {
-        for (host, rules, expected) in [
-            ("example.com", "", false),
-            ("EXAMPLE.com.", "localhost; example.COM", true),
-            ("evil-example.com", "example.com", false),
-            ("a.example.com", "*.example.com", true),
-            ("example.com", "*.example.com", false),
-            ("example.com", ".example.com", true),
-            ("a.example.com", ".example.com", true),
-            ("notexample.com", ".example.com", false),
-            ("example.com.evil", "*.example.com", false),
-            ("api.dev.internal", "api.*.internal", true),
-            ("anything.example", "*", true),
-            ("127.0.0.1", "localhost, 127.*", true),
-        ] {
-            assert_eq!(matches_bypass(host, rules).unwrap(), expected, "{host}: {rules}");
-        }
-    }
-
-    #[test]
-    fn local_means_simple_hostname_not_private_ip() {
-        for (host, expected) in [
-            ("printer", true),
-            ("printer.", true),
-            ("printer.example", false),
-            ("127.0.0.1", false),
-            ("[::1]", false),
-        ] {
-            assert_eq!(matches_bypass(host, "<LOCAL>").unwrap(), expected);
-        }
-    }
-
-    #[test]
-    fn matches_literal_ips_and_cidr_without_dns() {
-        for (host, rule, expected) in [
-            ("10.1.2.3", "10.0.0.0/8", true),
-            ("11.0.0.1", "10.0.0.0/8", false),
-            ("10.1.2.3", "10.1.2.3/32", true),
-            ("localhost", "127.0.0.0/8", false),
-            ("[2001:db8::1]", "2001:db8::/32", true),
-            ("[::1]", "0:0:0:0:0:0:0:1", true),
-            ("::1", "[::1]", true),
-            ("::1", "0.0.0.0/0", false),
-        ] {
-            assert_eq!(matches_bypass(host, rule).unwrap(), expected, "{host}: {rule}");
-        }
-    }
-
-    #[test]
-    fn invalid_rules_fail_even_after_a_match() {
-        for rule in [
-            "10.0.0.0/33",
-            "::/129",
-            "https://example.com",
-            "example.com:80",
-            "<invalid>",
-            "a?b",
-            "a..b",
-            "bad rule",
-        ] {
-            assert!(matches!(
-                matches_bypass("example.com", &format!("*;{rule}")),
-                Err(TargetResolveError::InvalidBypassRule { .. })
-            ));
-        }
-    }
-
-    #[test]
-    fn manual_resolution_applies_bypass_to_http_and_connect() {
-        for uri in ["http://api.example/path", "api.example:443"] {
-            let uri: Uri = uri.parse().unwrap();
-            assert!(matches!(
-                resolve_manual(&uri, "proxy", &8080, "*.example").unwrap(),
-                ResolvedDestination::Direct
-            ));
-            assert!(
-                matches!(resolve_manual(&uri, "proxy", &8080, "elsewhere.example").unwrap(), ResolvedDestination::HttpProxy { host, port: 8080 } if host == "proxy")
-            );
-            assert!(resolve_manual(&uri, "proxy", &8080, "invalid/99").is_err());
-        }
-    }
-}
+#[path = "target_resolver.test.rs"]
+mod tests;
